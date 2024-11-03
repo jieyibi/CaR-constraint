@@ -455,10 +455,11 @@ class Trainer:
         else:
             loss = construct_loss  + improve_loss * coefficient
             self.metric_logger.coefficient.update(coefficient)
-            self.metric_logger.lambda_tw.update(self.lambda_[0].item())
-            self.metric_logger.lambda_demand.update(self.lambda_[1].item())
-            self.metric_logger.lambda_backhaul.update(self.lambda_[2].item())
-            self.metric_logger.lambda_dl.update(self.lambda_[3].item())
+            if self.trainer_params["reward_gating"] or self.trainer_params["adaptive_primal_dual"]:
+                self.metric_logger.lambda_tw.update(self.lambda_[0].item())
+                self.metric_logger.lambda_demand.update(self.lambda_[1].item())
+                self.metric_logger.lambda_backhaul.update(self.lambda_[2].item())
+                self.metric_logger.lambda_dl.update(self.lambda_[3].item())
         loss = loss / self.trainer_params["accumulation_steps"]
         if not amp_training:
             # if self.model_params["use_LoRA"]:
@@ -674,13 +675,14 @@ class Trainer:
             state = (env, rec, context, context2, action)
             if self.model_params["use_LoRA"] and t >= self.trainer_params["LoRA_begin_step"]: use_LoRA=True
             with torch.amp.autocast(device_type="cuda", enabled=amp_training):
-                action, log_lh, entro_p = self.model(state, solver="improvement", require_entropy=True, use_LoRA=use_LoRA)
+                action, log_lh, entro_p, improvement_method  = self.model(state, solver="improvement", require_entropy=True, use_LoRA=use_LoRA)
 
             if self.model.training: memory.logprobs.append(log_lh.clone())
             entropy.append(entro_p)
 
             # state transient
             rec, rewards, obj, feasibility_history, context, context2, info, out_penalty, out_node_penalty = env.k_opt_step(rec, action, obj, feasibility_history, t,
+                                                                                             improvement_method = improvement_method,
                                                                                              weights=weights, out_reward = self.trainer_params["out_reward"],
                                                                                              penalty_factor=self.lambda_, penalty_normalize=self.trainer_params["penalty_normalize"])
 
@@ -888,11 +890,12 @@ class Trainer:
                 state = (env, rec, context, context2, action)
 
                 if self.model_params["use_LoRA"] and t >= self.trainer_params["LoRA_begin_step"]: use_LoRA = True
-                action, _ = self.model(state, solver="improvement", require_entropy=False, use_LoRA=use_LoRA)
+                action, _, improvement_method = self.model(state, solver="improvement", require_entropy=False, use_LoRA=use_LoRA)
 
                 # state transient
                 # rec, rewards, obj, feasibility_history, context, context2, info
-                rec, _, obj, feasibility_history, context, context2, _, out_penalty, out_node_penalty = env.k_opt_step(rec, action, obj, feasibility_history, t)
+                rec, _, obj, feasibility_history, context, context2, _, out_penalty, out_node_penalty = env.k_opt_step(rec, action, obj, feasibility_history, t,
+                                                                                                                       improvement_method = improvement_method,)
 
                 # memory.obj.append(obj.clone())
                 # memory.cum_demand.append(context[2])

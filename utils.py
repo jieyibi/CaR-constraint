@@ -456,9 +456,7 @@ def rec2sol(rec):
     visited_time = torch.zeros((batch_size, seq_length)).to(rec.device)
     pre = torch.zeros((batch_size), device=rec.device).long()
     for i in range(seq_length):
-        visited_time[torch.arange(batch_size), rec[torch.arange(batch_size), pre]] = (
-            i + 1
-        )
+        visited_time[torch.arange(batch_size), rec[torch.arange(batch_size), pre]] = (i + 1)
         pre = rec[torch.arange(batch_size), pre]
 
     visited_time = visited_time % seq_length
@@ -477,6 +475,29 @@ def sol2rec(solution):
     rec.scatter_(1, solution_pre, solution_post)
     return rec.view(batch_size, pomo_size, -1)
 
+
+def get_previous_nodes(rec, selected_points):
+    """
+    Get the previous node for each selected point in the linked list.
+
+    Args:
+        rec: Tensor, with shape (B, N), representing solutions for B instances, each solution is a linked list.
+        selected_points: Tensor, with shape (B, 1), representing the index of a selected point in each instance.
+
+    Returns:
+        Tensor, with shape (B, 1), representing the index of the previous point for each selected point in each instance.
+    """
+    rec = rec.clone()
+    batch_size, num_nodes = rec.size()
+    selected_points = selected_points.squeeze(-1)  # Remove the last dimension, make selected_points shape (B,)
+
+    # Create index mask, indicating which position in each instance is the selected point
+    indices = torch.arange(num_nodes).expand(batch_size, num_nodes)
+    mask0 = (rec == selected_points.unsqueeze(1))
+    previous_nodes = torch.where(mask0, indices, torch.full_like(indices, -1))
+    previous_nodes = torch.max(previous_nodes, dim=1, keepdim=True).values  # Get the index of the previous node
+
+    return previous_nodes
 
 class Memory:
     def __init__(self):
