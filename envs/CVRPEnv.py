@@ -529,14 +529,19 @@ class CVRPEnv:
 
         return self._get_travel_distance()
 
-    def k_opt_step(self, rec, action, obj, feasible_history, t, weights=0, out_reward = False, penalty_factor=1.):
+    def improvement_step(self, rec, action, obj, feasible_history, t, weights=0, out_reward = False, penalty_factor=1., improvement_method = "kopt", insert_before=True):
 
         _, total_history = feasible_history.size()
         pre_bsf = obj[:, 1:].clone()  # batch_size, 3 (current, bsf, tsp_bsf)
         feasible_history = feasible_history.clone()  # bs, total_history
 
-        # k-opt step
-        next_state = self.k_opt(rec, action)
+        # improvement
+        if improvement_method == "kopt":
+            next_state = self.k_opt(rec, action)
+        elif improvement_method == "rm_n_insert":
+            next_state = self.rm_n_insert(rec, action, insert_before=insert_before)
+        else:
+            raise NotImplementedError()
         next_obj, context, out_penalty, out_node_penalty = self.get_costs(next_state, get_context=True, out_reward=out_reward, penalty_factor=penalty_factor)
         # if out_reward:
         #     out_node_penalty = (context[2] > 1.00001).sum(dim=-1)
@@ -638,6 +643,56 @@ class CVRPEnv:
 
         return rec_next
 
+    def rm_n_insert(self, rec, action, insert_before=True):
+        """
+        Perform remove and insert operations on the linked list solutions.
+
+        Args:
+            rec: Tensor, with shape (B, N), representing solutions for B instances, each solution is a linked list.
+            action: Tensor, with shape (B, rm_num * 2), representing remove and insert actions for each instance.
+                     Each row contains [remove_1, insert_1, remove_2, insert_2, remove_3, insert_3, ...].
+            insert_before: Boolean, if True insert before the specified node, if False insert after the specified node.
+
+        Returns:
+            Tensor, with shape (B, N), representing the updated linked list solutions after remove and insert operations.
+        """
+        rm_num = action.size(1) // 2
+        sol = rec2sol(rec)
+        batch_size, num_nodes = sol.size()
+        updated_sol = sol.clone()
+
+        # Expand action to match dimensions
+        remove_indices = action[:, ::2]  # Shape (B, 3)
+        insert_indices = action[:, 1::2]  # Shape (B, 3)
+
+        for i in range(rm_num):
+            # Step 1: Find the position of the node to be removed
+            remove_idx = remove_indices[:, i]  # Shape (B,)
+            remove_mask = (updated_sol == remove_idx.unsqueeze(1))  # Shape (B, N), Boolean mask for nodes to be removed
+            remove_pos = remove_mask.nonzero(as_tuple=True)[1]  # Shape (B,), indices of nodes to be removed
+
+            # Step 2: Remove the node from the solution
+            keep_mask = ~remove_mask  # Invert the mask to keep other nodes
+            sol_without_removed = torch.masked_select(updated_sol, keep_mask).view(batch_size,
+                                                                                   num_nodes - 1)  # Shape (B, N-1)
+
+            # Step 3: Find the position to insert
+            insert_idx = insert_indices[:, i]  # Shape (B,)
+            insert_mask = (sol_without_removed == insert_idx.unsqueeze(1))  # Shape (B, N-1)
+            insert_pos = insert_mask.nonzero(as_tuple=True)[1]  # Shape (B,), indices of nodes to insert before/after
+
+            # Step 4: Insert the removed node before or after the specified position
+            new_sol = []
+            for b in range(batch_size):
+                pos = insert_pos[b].item()
+                if insert_before:
+                    new_sol.append(torch.cat((sol_without_removed[b, :pos], remove_idx[b:b + 1], sol_without_removed[b, pos:])))
+                else:
+                    new_sol.append(torch.cat((sol_without_removed[b, :pos + 1], remove_idx[b:b + 1], sol_without_removed[b, pos + 1:])))
+
+            updated_sol = torch.stack(new_sol)
+
+        return sol2rec(updated_sol.unsqueeze(1)).squeeze(1)
 
     def f(self, p):  # The entropy measure in Eq.(5)
         return torch.clamp(1 - 0.5 * torch.log2(2.5 * np.pi * np.e * p * (1 - p) + 1e-5), 0, 1)

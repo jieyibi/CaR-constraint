@@ -758,17 +758,17 @@ class VRPBLTWEnv:
 
         return visited_time, None, feature
 
-    def k_opt_step(self, rec, action, obj, feasible_history, t, improvement_method = "kopt", weights=0, out_reward = False, penalty_factor=1., penalty_normalize=False):
+    def improvement_step(self, rec, action, obj, feasible_history, t, improvement_method = "kopt", weights=0, out_reward = False, penalty_factor=1., penalty_normalize=False, insert_before=True):
 
         _, total_history = feasible_history.size()
         pre_bsf = obj[:, 1:].clone()  # batch_size, 3 (current, bsf, tsp_bsf)
         feasible_history = feasible_history.clone()  # bs, total_history
 
-        # k-opt step
+        # improvement
         if improvement_method == "kopt":
             next_state = self.k_opt(rec, action)
         elif improvement_method == "rm_n_insert":
-            next_state = self.rm_n_insert(rec, action)
+            next_state = self.rm_n_insert(rec, action, insert_before=insert_before)
         else:
             raise NotImplementedError()
 

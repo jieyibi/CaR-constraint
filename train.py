@@ -95,7 +95,7 @@ def args2dict(args):
                       "improvement_only": args.improvement_only, "init_sol_strategy": args.init_sol_strategy,
                       "max_dummy_size": args.max_dummy_size, "improve_start_when_dummy_ok": args.improve_start_when_dummy_ok,
                       "val_init_sol_strategy": args.val_init_sol_strategy,
-                      "improvement_method": args.improvement_method, "rm_num": args.rm_num,
+                      "improvement_method": args.improvement_method, "rm_num": args.rm_num, "insert_before": args.insert_before,
                       "improve_steps": args.improve_steps, "total_history": args.total_history,
                       "stochastic_probability": args.stochastic_probability, "select_strategy": args.select_strategy,
                       "select_top_k": args.select_top_k, "diversity": args.diversity,
@@ -142,10 +142,10 @@ if __name__ == "__main__":
 
     # tester_params
     parser.add_argument('--eval_only', type=bool, default=False)
-    parser.add_argument('--test_episodes', type=int, default=10000)
-    parser.add_argument('--test_batch_size', type=int, default=3334)
+    parser.add_argument('--test_episodes', type=int, default=1000)
+    parser.add_argument('--test_batch_size', type=int, default=1000)
     parser.add_argument("--test_pomo_size", type=int, default=1)
-    parser.add_argument('--test_dataset', type=str, nargs='+', default=["tsptw100_da_silva_uniform.pkl"])
+    parser.add_argument('--test_dataset', type=str, nargs='+', default=None)#["tsptw100_da_silva_uniform.pkl"]
     parser.add_argument('--test_z_sample_size', type=int, default=0)
     parser.add_argument('--eval_type', type=str, default="argmax", choices=["argmax", "softmax"])
     parser.add_argument('--sample_size', type=int, default = 1)
@@ -226,8 +226,9 @@ if __name__ == "__main__":
 
     # improvement
     parser.add_argument('--improvement_only', type=bool, default=False)
-    parser.add_argument('--improvement_method', type=str, default="rm_n_insert", choices=["rm_n_insert", "kopt", "all"])
+    parser.add_argument('--improvement_method', type=str, default="all", choices=["rm_n_insert", "kopt", "all"])
     parser.add_argument('--boundary', type=float, default=0.5)
+    parser.add_argument('--insert_before', type=bool, default=True)
     parser.add_argument('--rm_num', type=int, default=1)
     parser.add_argument('--init_sol_strategy', type=str, default="POMO", choices=["random", "greedy_feasible", "random_feasible", "POMO"])
     parser.add_argument('--val_init_sol_strategy', type=str, default="POMO", choices=["random", "greedy_feasible", "random_feasible", "POMO"])
@@ -259,7 +260,7 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=2023)
     parser.add_argument('--log_dir', type=str, default="./results")
     parser.add_argument('--no_cuda', action='store_true')
-    parser.add_argument('--gpu_id', type=str, default="1")
+    parser.add_argument('--gpu_id', type=str, default="0")
     parser.add_argument('--world_size', type=int, default=1)
     parser.add_argument("--multiple_gpu", type=bool, default=False)
     parser.add_argument('--occ_gpu', type=float, default=0., help="occupy (X)% GPU memory in advance, please use sparingly.")
@@ -296,9 +297,10 @@ if __name__ == "__main__":
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_tw+capacity"
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_learnable_reward" #_learnable_reward
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_primal_dual" # currently not the primary objective
-    note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_RmIns_only_x1_before"
+    # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_RmIns_only_x1_after"
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_dynamicRmIns"
-    # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_0p5_RmInsORkopt"
+    note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_0p5_Rmx1InsbeforeORkopt"
+    # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct"
     # note = "debug"
     # note = "test"
     if "debug" in note:
@@ -307,6 +309,9 @@ if __name__ == "__main__":
         args.train_episodes = 3
         args.validation_batch_size = 5
         args.val_episodes = 2
+    if "test" in note:
+        args.wandb_logger = False
+        args.tb_logger = False
     args.train_batch_size //= args.world_size
 
     env_params, model_params, optimizer_params, trainer_params, tester_params = args2dict(args)

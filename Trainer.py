@@ -681,10 +681,10 @@ class Trainer:
             entropy.append(entro_p)
 
             # state transient
-            rec, rewards, obj, feasibility_history, context, context2, info, out_penalty, out_node_penalty = env.k_opt_step(rec, action, obj, feasibility_history, t,
+            rec, rewards, obj, feasibility_history, context, context2, info, out_penalty, out_node_penalty = env.improvement_step(rec, action, obj, feasibility_history, t,
                                                                                              improvement_method = improvement_method,
                                                                                              weights=weights, out_reward = self.trainer_params["out_reward"],
-                                                                                             penalty_factor=self.lambda_, penalty_normalize=self.trainer_params["penalty_normalize"])
+                                                                                             penalty_factor=self.lambda_, penalty_normalize=self.trainer_params["penalty_normalize"], insert_before=self.trainer_params["insert_before"])
 
             if self.model.training: batch_reward.append(rewards[:, 0].clone())
             memory.rewards.append(rewards)
@@ -894,8 +894,8 @@ class Trainer:
 
                 # state transient
                 # rec, rewards, obj, feasibility_history, context, context2, info
-                rec, _, obj, feasibility_history, context, context2, _, out_penalty, out_node_penalty = env.k_opt_step(rec, action, obj, feasibility_history, t,
-                                                                                                                       improvement_method = improvement_method,)
+                rec, _, obj, feasibility_history, context, context2, _, out_penalty, out_node_penalty = env.improvement_step(rec, action, obj, feasibility_history, t,
+                                                                                                                       improvement_method = improvement_method, insert_before=self.trainer_params["insert_before"])
 
                 # memory.obj.append(obj.clone())
                 # memory.cum_demand.append(context[2])
