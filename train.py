@@ -91,6 +91,7 @@ def args2dict(args):
                       "fsb_dist_only": args.fsb_dist_only, "fsb_reward_only":args.fsb_reward_only,
                       "infsb_dist_penalty": args.infsb_dist_penalty, "penalty_factor": args.penalty_factor, "reward_gating": args.reward_gating,
                       "adaptive_primal_dual": args.adaptive_primal_dual, "constraint_number": args.constraint_number,
+                      "bonus_for_construction": args.bonus_for_construction,
                       # improvement
                       "improvement_only": args.improvement_only, "init_sol_strategy": args.init_sol_strategy,
                       "max_dummy_size": args.max_dummy_size, "improve_start_when_dummy_ok": args.improve_start_when_dummy_ok,
@@ -197,6 +198,7 @@ if __name__ == "__main__":
 
     # trainer_params
     parser.add_argument('--baseline', type=str, choices=['group', "improve", "share"], default="group")
+    parser.add_argument('--bonus_for_construction', type=bool, default=True)
     # group reward: average rollout as baselines
     # parser.add_argument('--select_top_k_grad', default=None, choices=[None, 10])
     parser.add_argument('--epochs', type=int, default=5000, help="total training epochs")
@@ -226,7 +228,7 @@ if __name__ == "__main__":
 
     # improvement
     parser.add_argument('--improvement_only', type=bool, default=False)
-    parser.add_argument('--improvement_method', type=str, default="all", choices=["rm_n_insert", "kopt", "all"])
+    parser.add_argument('--improvement_method', type=str, default="kopt", choices=["rm_n_insert", "kopt", "all"])
     parser.add_argument('--boundary', type=float, default=0.5)
     parser.add_argument('--insert_before', type=bool, default=True)
     parser.add_argument('--rm_num', type=int, default=1)
@@ -260,7 +262,7 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=2023)
     parser.add_argument('--log_dir', type=str, default="./results")
     parser.add_argument('--no_cuda', action='store_true')
-    parser.add_argument('--gpu_id', type=str, default="0")
+    parser.add_argument('--gpu_id', type=str, default="1")
     parser.add_argument('--world_size', type=int, default=1)
     parser.add_argument("--multiple_gpu", type=bool, default=False)
     parser.add_argument('--occ_gpu', type=float, default=0., help="occupy (X)% GPU memory in advance, please use sparingly.")
@@ -299,8 +301,8 @@ if __name__ == "__main__":
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_primal_dual" # currently not the primary objective
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_RmIns_only_x1_after"
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_dynamicRmIns"
-    note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_0p5_Rmx1InsbeforeORkopt"
-    # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct"
+    # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_0p5_Rmx1InsbeforeORkopt"
+    note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_improveBonus" # reduce the advantage of the Non-topK constructed solutions, and increase the advantage of the TopK ones (exclude Non-improved ones)
     # note = "debug"
     # note = "test"
     if "debug" in note:
@@ -309,6 +311,7 @@ if __name__ == "__main__":
         args.train_episodes = 3
         args.validation_batch_size = 5
         args.val_episodes = 2
+        args.improve_start_when_dummy_ok = False
     if "test" in note:
         args.wandb_logger = False
         args.tb_logger = False

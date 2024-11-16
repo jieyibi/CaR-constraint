@@ -433,7 +433,7 @@ class Trainer:
         if not self.model_params["improvement_only"]:
             construct_loss = self._get_construction_output(infeasible, reward, prob_list, improve_reward, select_idx)
         else:
-            construct_loss = 0.0
+            construct_loss = 0.0, 0.0
 
         if self.epoch == 1: self._print_log()
         if accumulation_step == 0:
@@ -750,7 +750,11 @@ class Trainer:
 
         # score = cost + penalty
         score = torch.stack(memory.obj) # shape: (T, batch*pomo)
-        improve_reward = score.min(dim=0)[0].view(batch_size, k, -1).min(dim=1)[0][:, 0] # shape: (batch)  # ATTENTION: WHY USING .min(dim=1)[0] AS THE IMPROVE BASELINE, NOT MEAN?
+        if self.trainer_params["bonus_for_construction"] and self.trainer_params["baseline"] != "improve":
+            improve_reward = score[:, :, 0].min(dim=0)[0].view(batch_size, k) # output the bsf during improvemnet for every initial solutions
+        else:
+            improve_reward = score.min(dim=0)[0].view(batch_size, k, -1).min(dim=1)[0][:, 0]
+            # shape: (batch)  # ATTENTION: WHY USING .min(dim=1)[0] AS THE IMPROVE BASELINE, NOT MEAN?
         score_mean = score.min(dim=0)[0].view(batch_size, k, -1).min(dim=1)[0].mean(0) # 3, i.e., (current, bsf, tsp_bsf)
         self.metric_logger.improve_metrics["current_score"].update(score_mean[0].item(), batch_size) # improve
         self.metric_logger.improve_metrics["bsf_score"].update(score_mean[1].item(), batch_size) # improve + construct
@@ -1085,6 +1089,12 @@ class Trainer:
                     if self.trainer_params["baseline"] == "group":
                         baseline = reward.float().mean(dim=1, keepdims=True)
                         advantage = reward - baseline  # (batch, pomo)
+                        if self.trainer_params["bonus_for_construction"] and improve_reward is not None:
+                            after_improve_reward = -reward.clone()
+                            after_improve_reward.scatter_(dim=1, index=select_idx, src=improve_reward)
+                            new_advantage = advantage / 10
+                            new_advantage = torch.where(after_improve_reward < -reward, advantage, new_advantage)
+                            advantage = new_advantage.clone()
                         log_prob = prob_list.log().sum(dim=2)  # (batch, pomo)
                     elif self.trainer_params["baseline"] == "improve":
                         # improve_reward.shape: (batch)
