@@ -3,7 +3,7 @@ import argparse
 import pprint as pp
 from datetime import datetime
 import wandb
-wandb.login(key="d7c2a4d107302d1b34184fb17ca47aa6f84055ac")
+# wandb.login(key="d7c2a4d107302d1b34184fb17ca47aa6f84055ac")
 from Trainer import Trainer
 from utils import *
 import torch.distributed as dist
@@ -57,7 +57,7 @@ def args2dict(args):
                     "ff_hidden_dim": args.ff_hidden_dim, "num_experts": args.num_experts, "eval_type": args.eval_type,
                     "norm": args.norm, "norm_loc": args.norm_loc, "expert_loc": args.expert_loc, "problem": args.problem,
                     "topk": args.topk, "routing_level": args.routing_level, "routing_method": args.routing_method,
-                    "dual_decoder": args.dual_decoder,
+                    "dual_decoder": args.dual_decoder, "clean_cache": args.clean_cache,
                     # improvement
                     "improvement_only": args.improvement_only, "problem_size": args.problem_size,
                     "improvement_method": args.improvement_method, "rm_num": args.rm_num, "boundary": args.boundary,
@@ -91,7 +91,10 @@ def args2dict(args):
                       "fsb_dist_only": args.fsb_dist_only, "fsb_reward_only":args.fsb_reward_only,
                       "infsb_dist_penalty": args.infsb_dist_penalty, "penalty_factor": args.penalty_factor, "reward_gating": args.reward_gating,
                       "adaptive_primal_dual": args.adaptive_primal_dual, "constraint_number": args.constraint_number,
-                      "bonus_for_construction": args.bonus_for_construction,
+                      # reward & loss
+                      "bonus_for_construction": args.bonus_for_construction, "diversity_loss": args.diversity_loss,
+                      "diversity_weight": args.diversity_weight, "probs_return": args.probs_return,
+                      "imitation_learning": args.imitation_learning, "imitation_loss_weight": args.imitation_loss_weight,
                       # improvement
                       "improvement_only": args.improvement_only, "init_sol_strategy": args.init_sol_strategy,
                       "max_dummy_size": args.max_dummy_size, "improve_start_when_dummy_ok": args.improve_start_when_dummy_ok,
@@ -197,10 +200,6 @@ if __name__ == "__main__":
     parser.add_argument('--use_fast_attention', type=bool, default=True)
 
     # trainer_params
-    parser.add_argument('--baseline', type=str, choices=['group', "improve", "share"], default="group")
-    parser.add_argument('--bonus_for_construction', type=bool, default=True)
-    # group reward: average rollout as baselines
-    # parser.add_argument('--select_top_k_grad', default=None, choices=[None, 10])
     parser.add_argument('--epochs', type=int, default=5000, help="total training epochs")
     parser.add_argument('--train_episodes', type=int, default=10000*2, help="the num. of training instances per epoch")
     parser.add_argument('--accumulation_steps', type=int, default=1)
@@ -225,6 +224,16 @@ if __name__ == "__main__":
     parser.add_argument('--reward_gating', type=bool, default=False)
     parser.add_argument('--adaptive_primal_dual', type=bool, default=False)
     parser.add_argument('--constraint_number', type = int, default=4)
+
+    # reward
+    parser.add_argument('--baseline', type=str, choices=['group', "improve", "share"], default="group")# group reward: average rollout as baselines
+    parser.add_argument('--bonus_for_construction', type=bool, default=False)
+    parser.add_argument('--diversity_loss', type=bool, default=False)
+    parser.add_argument('--diversity_weight', type=float, default=0.01)
+    parser.add_argument('--probs_return', type=bool, default=False) # only calculate the entropy for the selected nodes when False
+    # parser.add_argument('--select_top_k_grad', default=None, choices=[None, 10])
+    parser.add_argument('--imitation_learning', type=bool, default=True)
+    parser.add_argument('--imitation_loss_weight', type=float, default=1.)
 
     # improvement
     parser.add_argument('--improvement_only', type=bool, default=False)
@@ -252,7 +261,7 @@ if __name__ == "__main__":
     parser.add_argument('--k_max', type=int, default=4)
     parser.add_argument('--with_regular', type=bool, default=False)
     parser.add_argument('--with_bonus', type=bool, default=False)
-    parser.add_argument('--with_local_bonus', type=bool, default=False)
+    parser.add_argument('--with_local_bonus', type=bool, default=False) #todo: add bonus for meeting specific 
 
     # load
     parser.add_argument('--checkpoint', type=str, default=None)
@@ -262,12 +271,13 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=2023)
     parser.add_argument('--log_dir', type=str, default="./results")
     parser.add_argument('--no_cuda', action='store_true')
-    parser.add_argument('--gpu_id', type=str, default="1")
+    parser.add_argument('--gpu_id', type=str, default="0")
     parser.add_argument('--world_size', type=int, default=1)
     parser.add_argument("--multiple_gpu", type=bool, default=False)
     parser.add_argument('--occ_gpu', type=float, default=0., help="occupy (X)% GPU memory in advance, please use sparingly.")
     parser.add_argument('--tb_logger', type=bool, default=True)
     parser.add_argument('--wandb_logger', type=bool, default=True)
+    parser.add_argument('--clean_cache', type=bool, default=True)
     parser.add_argument('--multi_processing', type=bool, default=False)
 
     args = parser.parse_args()
@@ -302,9 +312,11 @@ if __name__ == "__main__":
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_RmIns_only_x1_after"
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_dynamicRmIns"
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_0p5_Rmx1InsbeforeORkopt"
-    note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_improveBonus" # reduce the advantage of the Non-topK constructed solutions, and increase the advantage of the TopK ones (exclude Non-improved ones)
+    # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_improveBonus" # reduce the advantage of the Non-topK constructed solutions, and increase the advantage of the TopK ones (exclude Non-improved ones)
+    # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_improveBonus_diversityLossV2Wp1"  #entropy
+    note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_IL"#
     # note = "debug"
-    # note = "test"
+    # note = "test "
     if "debug" in note:
         args.wandb_logger = False
         args.tb_logger = False

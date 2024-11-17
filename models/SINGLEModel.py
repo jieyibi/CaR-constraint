@@ -448,7 +448,7 @@ class SINGLE_Encoder(nn.Module):
             # else:
             #     layer_i += 1
             #     out = layer(out, route_attn)
-            if not self.training:
+            if not self.training and self.model_params["clean_cache"]:
                 torch.cuda.empty_cache()
 
         # if use_LoRA: # this implementation uses the whole encoder as the W0 (cannot merge AB to W0)
@@ -532,12 +532,12 @@ class EncoderLayer(nn.Module):
             score = torch.cat([score, route_attn], dim=1)
             if not self.training:
                 del route_attn
-                torch.cuda.empty_cache()
+                if self.model_params["clean_cache"]: torch.cuda.empty_cache()
             # shape: (batch, head_num*2, n, problem)
             score_scaled = self.score_aggr(score.permute(0,2,3,1)).permute(0,3,1,2)
             if not self.training:
                 del score
-                torch.cuda.empty_cache()
+                if self.model_params["clean_cache"]: torch.cuda.empty_cache()
 
         if rank2_ninf_mask is not None:
             score_scaled = score_scaled + rank2_ninf_mask[:, None, None, :].expand(batch_s, head_num, n, input_s)

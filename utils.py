@@ -449,6 +449,15 @@ def get_solution_with_dummy_depot(solution, problem_size):
 
     return solution
 
+def remove_dummy_depot_from_solution(solution, problem_size):
+    # solution.size: (batch, pomo, solution)
+    batch_size, pomo_size, _ = solution.size()
+    dummy_size = solution.size(-1) - problem_size
+    solution = solution.clone()
+    solution[solution < dummy_size] = 0
+    solution[solution != 0] -= (dummy_size - 1)
+    return solution
+
 def rec2sol(rec):
     # input: rec (solution in linked list format)
     # reference: Ma, Yining, Zhiguang Cao, and Yeow Meng Chee. "Learning to search feasible and infeasible regions of routing problems with flexible neural k-opt." Advances in Neural Information Processing Systems 36 (2024).
@@ -576,6 +585,10 @@ class metric_logger:
         self.construct_metrics = {
             "score": AverageMeter(),
             "loss": AverageMeter(),
+            "construct_RL_loss": AverageMeter(),
+            "diversity_loss": AverageMeter(),
+            "is_improved": AverageMeter(),
+            "imitation_loss": AverageMeter(),
             "sol_infeasible_rate": AverageMeter(),
             "ins_infeasible_rate": AverageMeter(),
             "feasible_dist_mean": AverageMeter(),

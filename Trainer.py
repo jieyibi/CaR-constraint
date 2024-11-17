@@ -132,7 +132,7 @@ class Trainer:
             # if dummy <= max_dummy_size, begin to improve
             # print("{}, {}".format(improve_steps, validation_improve_steps))
             if self.trainer_params["improve_start_when_dummy_ok"]:
-                if epoch == 1 or (dummy_size > self.trainer_params["max_dummy_size"]):
+                if self.start_epoch == 1 and (epoch == 1 or (dummy_size > self.trainer_params["max_dummy_size"])):
                     self.trainer_params["improve_steps"] = 0
                     self.trainer_params["validation_improve_steps"] = 0
                 else:
@@ -375,7 +375,8 @@ class Trainer:
             while not done:
                 with torch.amp.autocast(device_type="cuda", enabled=amp_training):
                     selected, prob, probs_return = self.model(state, pomo=self.env_params["pomo_start"],
-                                                              candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None)
+                                                              candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None,
+                                                              return_probs=self.trainer_params["probs_return"])
                                                               # return_probs=self.trainer_params["reward_gating"])
                 if probs_return is not None:
                     # constraint_mask = env.simulated_ninf_flag.to(self.device)
@@ -423,17 +424,37 @@ class Trainer:
             else:
                 cons_reward = torch.stack(reward).sum(0)
             cons_log_prob = prob_list.log().sum(dim=2) if self.trainer_params["baseline"] == "share" else None # (batch, pomo)
-            improve_loss, improve_reward, select_idx = self._improvement(env, cons_reward, batch_reward, weights, cons_log_prob)
+            improve_loss, improve_reward, select_idx, best_solution, is_improved = self._improvement(env, cons_reward, batch_reward, weights, cons_log_prob)
             # if "TSP" not in self.args.problem: self.metric_logger.dummy_size.update(env.dummy_size, batch_size)
         else:
-            improve_loss, improve_reward, select_idx = 0.0, None, None
+            improve_loss, improve_reward, select_idx, best_solution = 0.0, None, None, None
         # if self.rank==0: print(f"Rank {self.rank} >> improvement time: ", time.time() - tik)
 
         ###########################################Step & Return########################################
         if not self.model_params["improvement_only"]:
-            construct_loss = self._get_construction_output(infeasible, reward, prob_list, improve_reward, select_idx)
+            construct_loss = self._get_construction_output(infeasible, reward, prob_list, improve_reward, select_idx, probs_return_list)
         else:
             construct_loss = 0.0, 0.0
+
+        if self.trainer_params["imitation_learning"] and best_solution is not None:
+            env.load_problems(batch_size, rollout_size=1, problems=data, aug_factor=1)
+            reset_state, _, _ = env.reset()
+            state, reward, done = env.pre_step()
+            imit_prob_list = torch.zeros(size=(batch_size, 1, 0)).to(self.device)
+            for step in range(best_solution.size(-1)):
+                with torch.amp.autocast(device_type="cuda", enabled=amp_training):
+                    _, prob, _ = self.model(state, pomo=self.env_params["pomo_start"], selected=best_solution[:,:,step],
+                                                   candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None)
+                imit_prob_list = torch.cat((imit_prob_list, prob[:, :, None]), dim=2)  # shape: (batch, pomo, solution)
+                # shape: (batch, pomo)
+                state, reward, done, infeasible = env.step(best_solution[:,:,step].to(self.device),
+                                                           out_reward=self.trainer_params["out_reward"],
+                                                           soft_constrained=self.trainer_params["soft_constrained"],
+                                                           backhaul_mask=self.trainer_params["backhaul_mask"],
+                                                           penalty_normalize=self.trainer_params["penalty_normalize"])
+            imitation_loss = -(is_improved * imit_prob_list.mean(-1).mean(-1)).mean()
+            self.metric_logger.construct_metrics["imitation_loss"].update(imitation_loss.item(), batch_size)
+            self.metric_logger.construct_metrics["is_improved"].update(is_improved.sum()/batch_size, batch_size)
 
         if self.epoch == 1: self._print_log()
         if accumulation_step == 0:
@@ -460,6 +481,8 @@ class Trainer:
                 self.metric_logger.lambda_demand.update(self.lambda_[1].item())
                 self.metric_logger.lambda_backhaul.update(self.lambda_[2].item())
                 self.metric_logger.lambda_dl.update(self.lambda_[3].item())
+        if self.trainer_params["imitation_learning"] and best_solution is not None:
+            loss += imitation_loss * self.trainer_params["imitation_loss_weight"]
         loss = loss / self.trainer_params["accumulation_steps"]
         if not amp_training:
             # if self.model_params["use_LoRA"]:
@@ -565,7 +588,7 @@ class Trainer:
             if self.rank==0: print(f"Rank {self.rank} >> val construction time: ", time.time() - tik)
             ###########################################Improvement########################################
             if self.trainer_params["validation_improve_steps"] > 0.:
-                torch.cuda.empty_cache()
+                if self.model_params["clean_cache"]: torch.cuda.empty_cache()
                 # self.model.decoder.k = None
                 # self.model.decoder.v = None
                 if self.rank==0: tik = time.time()
@@ -652,7 +675,6 @@ class Trainer:
         if "TSP" not in self.args.problem: solution = get_solution_with_dummy_depot(solution, env.problem_size)
         batch_size, k, solution_size = solution.size()
         rec = sol2rec(solution).view(batch_size * k, -1)
-        rec_best = rec.clone()
 
         # preapare input
         obj, context, out_penalty, out_node_penalty = env.get_costs(rec, get_context=True, out_reward=self.trainer_params["out_reward"], penalty_factor = self.lambda_)
@@ -662,6 +684,9 @@ class Trainer:
         total_history = self.trainer_params["total_history"]
         feasibility_history = feasibility_history.view(-1, 1).expand(batch_size * k, total_history)
         action = None
+        best_reward, best_index = (obj[:, 0].view(batch_size, k)).min(-1)
+        rec_best = rec.view(batch_size, k, -1)[torch.arange(batch_size),best_index,:].clone()
+        is_improved = torch.zeros(batch_size).bool()
 
         # sample trajectory
         t = 0
@@ -685,6 +710,13 @@ class Trainer:
                                                                                              improvement_method = improvement_method,
                                                                                              weights=weights, out_reward = self.trainer_params["out_reward"],
                                                                                              penalty_factor=self.lambda_, penalty_normalize=self.trainer_params["penalty_normalize"], insert_before=self.trainer_params["insert_before"])
+
+            # update best solution
+            new_best, best_index = obj[:, 0].view(batch_size, k).min(-1)
+            index = new_best < best_reward
+            best_reward[index] = new_best[index] # update best reward
+            is_improved = (is_improved | index)
+            rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size), best_index, :][index].clone() # update best solution
 
             if self.model.training: batch_reward.append(rewards[:, 0].clone())
             memory.rewards.append(rewards)
@@ -838,7 +870,7 @@ class Trainer:
         # end update
         memory.clear_memory()
 
-        return loss_mean, improve_reward, select_idx
+        return loss_mean, improve_reward, select_idx, remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size), is_improved
 
     def _val_improvement(self, env, aug_factor):
 
@@ -989,7 +1021,7 @@ class Trainer:
             # end update
             # memory.clear_memory()
 
-    def _get_construction_output(self, infeasible, reward, prob_list=None, improve_reward=None, select_idx=None):
+    def _get_construction_output(self, infeasible, reward, prob_list=None, improve_reward=None, select_idx=None, probs_return_list=None):
         # Input.shape
         # infeasible: (batch, pomo)
         # reward (list or tensor): (batch, pomo)
@@ -1110,8 +1142,17 @@ class Trainer:
                         log_prob = prob_list.log().sum(dim=2).gather(1, non_select_idx)  # (batch, pomo-k)
                     else:
                         raise NotImplementedError
-
                 loss = - advantage * log_prob  # Minus Sign: To Increase REWARD
+                if self.trainer_params["diversity_loss"]:
+                    self.metric_logger.construct_metrics["construct_RL_loss"].update(loss.mean().item(), batch_size)
+                    if probs_return_list is None:
+                        # implementation 1: only focus on the entropy on the probs of the selected nodes
+                        diversity_loss = -(prob_list * prob_list.log()).sum(dim=2)  # Entropy
+                    else:
+                        # implementation 2: increase diversity for the whole action probability distributions
+                        diversity_loss = -(probs_return_list * probs_return_list.log()).sum(dim=2).mean(dim=-1) # b * p
+                    loss = loss - self.trainer_params['diversity_weight'] * diversity_loss  # Minus Sign: To Increase Diversity (i.e. Entropy)
+                    self.metric_logger.construct_metrics["diversity_loss"].update(diversity_loss.mean().item(), batch_size)
                 loss_mean = loss.mean()
             self.metric_logger.construct_metrics["loss"].update(loss_mean.item(), batch_size)
 
@@ -1281,10 +1322,14 @@ class Trainer:
                     if self.rank==0: print(f'Rank {self.rank} >> Epoch {self.epoch}: Train ({100. * self.episode / self.trainer_params["train_episodes"]:.0f}%) \n[Construction] Score: {self.metric_logger.construct_metrics["score"].avg:.4f},  Loss: {self.metric_logger.construct_metrics["loss"].avg:.4f}')
                     if self.rank==0 and self.trainer_params["improve_steps"] > 0.: print(f'[Improvement] Score: {self.metric_logger.improve_metrics["current_score"].avg:.4f} [BSF: {self.metric_logger.improve_metrics["bsf_score"].avg:.4f}],  Loss: {self.metric_logger.improve_metrics["loss"].avg:.4f}, Entropy: {self.metric_logger.improve_metrics["entropy"].avg:.4f}')
 
+        if self.rank == 0 and self.trainer_params["diversity_loss"]:
+            print(f'Diversity Loss: {self.metric_logger.construct_metrics["diversity_loss"].avg:.4f}, Constructive RL loss: {self.metric_logger.construct_metrics["construct_RL_loss"].avg:.4f}')
     def _log_in_tb_logger(self, epoch):
 
         self.tb_logger.log_value('construction/train_score', self.metric_logger.construct_metrics["score"].avg, epoch)
         self.tb_logger.log_value('construction/train_loss', self.metric_logger.construct_metrics["loss"].avg, epoch)
+        self.tb_logger.log_value('construction/construct_RL_loss', self.metric_logger.construct_metrics["construct_RL_loss"].avg, epoch)
+        self.tb_logger.log_value('construction/diversity_loss', self.metric_logger.construct_metrics["diversity_loss"].avg, epoch)
         self.tb_logger.log_value('construction/max_vehicle_number', self.metric_logger.dummy_size.avg, epoch)
         self.tb_logger.log_value('coefficient', self.metric_logger.coefficient.avg, epoch)
         self.tb_logger.log_value('sigma1', self.metric_logger.sigma1.avg, epoch)
@@ -1356,6 +1401,8 @@ class Trainer:
         log_data = {
             'construction/train_score': self.metric_logger.construct_metrics["score"].avg,
             'construction/train_loss': self.metric_logger.construct_metrics["loss"].avg,
+            'construction/construct_RL_loss': self.metric_logger.construct_metrics["construct_RL_loss"].avg,
+            'construction/diversity_loss': self.metric_logger.construct_metrics["diversity_loss"].avg,
             'construction/max_vehicle_number': self.metric_logger.dummy_size.avg,
             'coefficient': self.metric_logger.coefficient.avg,
             'sigma1': self.metric_logger.sigma1.avg,
