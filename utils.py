@@ -585,6 +585,7 @@ class metric_logger:
         self.construct_metrics = {
             "score": AverageMeter(),
             "loss": AverageMeter(),
+            "improvement_value": AverageMeter(),
             "construct_RL_loss": AverageMeter(),
             "diversity_loss": AverageMeter(),
             "is_improved": AverageMeter(),

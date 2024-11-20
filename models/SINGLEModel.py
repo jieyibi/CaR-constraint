@@ -162,16 +162,11 @@ class SINGLEModel(nn.Module):
             elif (feasible_start is not None or pomo) and state.selected_count == 1 and pomo_size > 1:  # Second Move, POMO
                     # selected = torch.arange(start=1, end=pomo_size+1)[None, :].expand(batch_size, pomo_size).to(self.device)
                     if feasible_start is not None:
-                        # 找到每个batch中值为0的索引
                         batch_indices, value_indices = (feasible_start[:,0,:] == 0).nonzero(as_tuple=True)
-                        # 准备输出tensor
                         selected = torch.zeros((batch_size, pomo_size), dtype=torch.long)
-                        # 对每个batch进行随机抽样
                         for i in range(batch_size):
-                            # 获取当前batch中值为0的索引
                             current_batch_indices = value_indices[batch_indices == i]
-                            if len(current_batch_indices) > 0:  # 如果当前batch中存在值为0的情况
-                                # 有放回地随机抽取sample_size个索引
+                            if len(current_batch_indices) > 0:
                                 sampled_indices = current_batch_indices[torch.randint(len(current_batch_indices), (pomo_size,))]
                                 selected[i] = sampled_indices
                             else:
@@ -673,6 +668,7 @@ class SINGLE_Decoder(nn.Module):
         self.k_max = self.model_params['k_max']
         self.rm_num = self.model_params["rm_num"]
         self.embedding_dim = embedding_dim
+        self.gumbel = self.model_params['gumbel']
 
         # self.Wq_1 = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         # self.Wq_2 = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
@@ -833,11 +829,16 @@ class SINGLE_Decoder(nn.Module):
             score_scaled = score / sqrt_embedding_dim
             # shape: (batch, pomo, problem)
             score_clipped = logit_clipping * torch.tanh(score_scaled)
+            if self.gumbel:
+                gumbel_noise = sample_gumbel(score_clipped)
+                if torch.isnan(gumbel_noise).any() or torch.isinf(gumbel_noise).any():
+                    print("Gumbel noise contains NaN or Inf!")
+                score_clipped = score_clipped + gumbel_noise
             score_masked = score_clipped + ninf_mask
             probs = torch.softmax(score_masked, dim=2)
             # shape: (batch, pomo, problem)
             if return_probs:
-                out_concat0 = self.attention_fn(q, self.k, self.v)
+                out_concat0 = self.attention_fn(q, self.k, self.v) # no mask
                 mh_atten_out0 = self.multi_head_combine(out_concat0)
                 score0 = torch.matmul(mh_atten_out0, self.single_head_key)
                 score_scaled0 = score0 / sqrt_embedding_dim
@@ -924,6 +925,11 @@ class SINGLE_Decoder(nn.Module):
                 score_scaled = score / sqrt_embedding_dim
                 # shape: (bs, 1, problem)
                 score_clipped = logit_clipping * torch.tanh(score_scaled).squeeze(1) # shape: (bs, problem)
+                if self.gumbel:
+                    gumbel_noise = sample_gumbel(score_clipped)
+                    if torch.isnan(gumbel_noise).any() or torch.isinf(gumbel_noise).any():
+                        print("Gumbel noise contains NaN or Inf!")
+                    score_clipped = score_clipped + gumbel_noise
                 score_masked = torch.where(mask, -1e4, score_clipped)
                 if i == 0 and isinstance(last_action, torch.Tensor):
                     score_masked.scatter_(1, last_action[:, :1], -1e4)
@@ -1359,6 +1365,13 @@ class LoRALayer(nn.Module):
             return original_out + x @ (self.lora_B @ self.lora_A).T
         else: # original layers have gradients
             return self.original_layer(x)
+
+def sample_gumbel(t_like, eps=1e-10):
+    # randomly sample standard gumbel variables
+    # u = torch.empty_like(t_like).uniform_()
+    # return -torch.log(-torch.log(u + eps) + eps)
+    u = torch.empty_like(t_like, dtype=torch.float32).uniform_(eps, 1.0 - eps) # avoid 0 / 1
+    return -torch.log(-torch.log(u))
 
 
 
