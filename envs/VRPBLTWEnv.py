@@ -632,7 +632,7 @@ class VRPBLTWEnv:
         # assert (self.visited_ninf_flag == float('-inf')).all(), "not visiting all nodes!"
         # assert torch.gather(~self.infeasible, 1, select_idx).all(), "not valid tour!"
 
-    def get_costs(self, rec, get_context=False, check_full_feasibility=False, out_reward=False, penalty_factor=1.0, penalty_normalize=False):
+    def get_costs(self, rec, get_context=False, check_full_feasibility=False, out_reward=False, penalty_factor=1.0, penalty_normalize=False, seperate_obj_penalty=False):
 
         k = rec.size(0) // self.depot_node_xy.size(0)
         self.dummy_size = rec.size(1) - self.problem_size
@@ -682,9 +682,15 @@ class VRPBLTWEnv:
 
         if out_reward:
             if isinstance(penalty_factor, torch.Tensor):
-                cost = cost + (penalty_factor.unsqueeze(1) * (out_node_penalty + out_penalty)).sum(0)
+                if seperate_obj_penalty:
+                    cost = [cost, (penalty_factor.unsqueeze(1) * (out_node_penalty + out_penalty)).sum(0)]
+                else:
+                    cost = cost + (penalty_factor.unsqueeze(1) * (out_node_penalty + out_penalty)).sum(0)
             else:
-                cost = cost + penalty_factor * (out_node_penalty.sum(0) + out_penalty.sum(0))
+                if seperate_obj_penalty:
+                    cost = [cost, penalty_factor * (out_node_penalty.sum(0) + out_penalty.sum(0))]
+                else:
+                    cost = cost + penalty_factor * (out_node_penalty.sum(0) + out_penalty.sum(0))
 
         # get context
         if get_context:
@@ -758,9 +764,12 @@ class VRPBLTWEnv:
 
         return visited_time, None, feature
 
-    def improvement_step(self, rec, action, obj, feasible_history, t, improvement_method = "kopt", weights=0, out_reward = False, penalty_factor=1., penalty_normalize=False, insert_before=True):
+    def improvement_step(self, rec, action, obj, feasible_history, t, improvement_method = "kopt", weights=0, out_reward = False, penalty_factor=1., penalty_normalize=False, insert_before=True, seperate_obj_penalty=False):
 
         _, total_history = feasible_history.size()
+        if seperate_obj_penalty:
+            obj, penalty = obj
+            pre_penalty_bsf =  penalty[:, 1:].clone()  # batch_size, 3 (current, bsf, tsp_bsf)
         pre_bsf = obj[:, 1:].clone()  # batch_size, 3 (current, bsf, tsp_bsf)
         feasible_history = feasible_history.clone()  # bs, total_history
 
@@ -772,7 +781,7 @@ class VRPBLTWEnv:
         else:
             raise NotImplementedError()
 
-        next_obj, context, out_penalty, out_node_penalty = self.get_costs(next_state, get_context=True, out_reward=out_reward, penalty_factor=penalty_factor, penalty_normalize=penalty_normalize)
+        next_obj, context, out_penalty, out_node_penalty = self.get_costs(next_state, get_context=True, out_reward=out_reward, penalty_factor=penalty_factor, penalty_normalize=penalty_normalize, seperate_obj_penalty=seperate_obj_penalty)
 
         # MDP step
         non_feasible_cost_total = out_penalty.sum(0)
@@ -780,16 +789,28 @@ class VRPBLTWEnv:
         soft_infeasible = (non_feasible_cost_total <= self.epsilon) & (non_feasible_cost_total > 0.)
 
         now_obj = pre_bsf.clone()
+        if seperate_obj_penalty:
+            next_obj, next_penalty_obj = next_obj
+            now_penalty_obj = pre_penalty_bsf.clone()
+
         if not out_reward:
             # only update feasible obj
+            if seperate_obj_penalty: now_penalty_obj[feasible, 0] = next_penalty_obj[feasible].clone()
             now_obj[feasible, 0] = next_obj[feasible].clone()
         else:
             # update all obj, obj = cost + penalty
+            if seperate_obj_penalty: now_penalty_obj[:, 0] = next_penalty_obj.clone()
             now_obj[:, 0] = next_obj.clone()
         # only update epsilon feasible obj
         now_obj[soft_infeasible, 1] = next_obj[soft_infeasible].clone()
         now_bsf = torch.min(pre_bsf, now_obj)
         rewards = (pre_bsf - now_bsf)  # bs,2 (feasible_reward, epsilon-feasible_reward)
+        if seperate_obj_penalty:
+            # reward = (pre_obj_bsf - now_obj_bsf) + (pre_penalty_bsf - now_penalty_bsf)
+            # original reward: (obj+penalty)_bsf - (obj+penalty)_now
+            now_penalty_obj[soft_infeasible, 1] = next_penalty_obj[soft_infeasible].clone()
+            now_penalty_bsf = torch.min(pre_penalty_bsf, now_penalty_obj)
+            rewards += (pre_penalty_bsf - now_penalty_bsf)
 
         # feasible history step
         feasible_history[:, 1:] = feasible_history[:, :total_history - 1].clone()
@@ -829,9 +850,14 @@ class VRPBLTWEnv:
                             rewards[:, 1:2] * 0.05 * self.env_params["with_bonus"],  # bonus, beta = 0.05
                             ), -1)
 
+        if seperate_obj_penalty:
+            obj_out = [torch.cat((next_obj[:, None], now_bsf), -1), torch.cat((next_penalty_obj[:, None], now_penalty_bsf), -1)]
+        else:
+            obj_out = torch.cat((next_obj[:, None], now_bsf), -1)
+
         out = (next_state,
                reward,
-               torch.cat((next_obj[:, None], now_bsf), -1),
+               obj_out,
                feasible_history,
                context,
                context2,

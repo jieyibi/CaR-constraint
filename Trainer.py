@@ -66,7 +66,9 @@ class Trainer:
             self.optimizer = Optimizer([{'params': self.model.parameters()}, {'params': [self.lambda_]}],
                                        **self.optimizer_params['optimizer'])
         else:
-            self.lambda_ = torch.ones((trainer_params["constraint_number"],), requires_grad=False) if trainer_params["adaptive_primal_dual"] else self.trainer_params["penalty_factor"]
+            # [torch.zeros([self.args.train_batch_size, 40])]
+            self.lambda_ = [torch.tensor(0.)] * trainer_params["constraint_number"] if trainer_params["subgradient"] else self.trainer_params["penalty_factor"]
+            self.subgradient_lr = trainer_params["subgradient_lr"]
             self.optimizer = Optimizer(self.model.parameters(), **self.optimizer_params['optimizer'])
         self.scheduler = Scheduler(self.optimizer, **self.optimizer_params['scheduler'])
         self.scaler = torch.cuda.amp.GradScaler()
@@ -476,11 +478,22 @@ class Trainer:
         else:
             loss = construct_loss  + improve_loss * coefficient
             self.metric_logger.coefficient.update(coefficient)
-            if self.trainer_params["reward_gating"] or self.trainer_params["adaptive_primal_dual"]:
-                self.metric_logger.lambda_tw.update(self.lambda_[0].item())
-                self.metric_logger.lambda_demand.update(self.lambda_[1].item())
-                self.metric_logger.lambda_backhaul.update(self.lambda_[2].item())
-                self.metric_logger.lambda_dl.update(self.lambda_[3].item())
+            if self.trainer_params["reward_gating"] or self.trainer_params["subgradient"]:
+                self.metric_logger.lambda_tw.update(self.lambda_[0].mean().item())
+                self.metric_logger.lambda_demand.update(self.lambda_[1].mean().item())
+                self.metric_logger.lambda_backhaul.update(self.lambda_[2].mean().item())
+                self.metric_logger.lambda_dl.update(self.lambda_[3].mean().item())
+                if self.trainer_params["subgradient"]:
+                    _, total_timeout_reward, timeout_nodes_reward, total_out_of_dl_reward, out_of_dl_nodes_reward, total_out_of_capacity_reward, out_of_capacity_nodes_reward = reward
+                    grad_timeout = total_timeout_reward + timeout_nodes_reward
+                    grad_out_of_capacity = total_out_of_capacity_reward + out_of_capacity_nodes_reward
+                    grad_out_of_dl = total_out_of_dl_reward + out_of_dl_nodes_reward
+                    # Update Lagrange multipliers with subgradient and learning rate, ensuring non-negative values
+                    self.lambda_[0] = torch.clamp(self.lambda_[0] - self.subgradient_lr * grad_timeout.mean(), min=0)
+                    self.lambda_[1] = torch.clamp(self.lambda_[1] - self.subgradient_lr * grad_out_of_capacity.mean(), min=0)
+                    self.lambda_[3] = torch.clamp(self.lambda_[3] - self.subgradient_lr * grad_out_of_dl.mean(), min=0)
+                    # Reduce learning rate as iterations progress to ensure convergence
+                    self.subgradient_lr = self.subgradient_lr / (1 + get_optimizer_step(self.optimizer))
         if self.trainer_params["imitation_learning"] and best_solution is not None:
             loss += imitation_loss * self.trainer_params["imitation_loss_weight"]
         loss = loss / self.trainer_params["accumulation_steps"]
@@ -677,16 +690,29 @@ class Trainer:
         rec = sol2rec(solution).view(batch_size * k, -1)
 
         # preapare input
-        obj, context, out_penalty, out_node_penalty = env.get_costs(rec, get_context=True, out_reward=self.trainer_params["out_reward"], penalty_factor = self.lambda_)
-        obj = torch.cat((obj[:, None], obj[:, None], obj[:, None]), -1).clone()
+        obj, context, out_penalty, out_node_penalty = env.get_costs(rec, get_context=True, out_reward=self.trainer_params["out_reward"], penalty_factor = self.lambda_, seperate_obj_penalty=self.trainer_params["seperate_obj_penalty"])
+        if self.trainer_params["seperate_obj_penalty"]:
+            obj, penalty = obj
+            obj = torch.cat((obj[:, None], obj[:, None], obj[:, None]), -1).clone()
+            penalty = torch.cat((penalty[:, None], penalty[:, None], penalty[:, None]), -1).clone()
+            obj = [obj, penalty]
+            best_reward, best_index = ((obj[0][:, 0] + obj[1][:, 0]).view(batch_size, k)).min(-1)
+        else:
+            obj = torch.cat((obj[:, None], obj[:, None], obj[:, None]), -1).clone()
+            best_reward, best_index = (obj[:, 0].view(batch_size, k)).min(-1)
         context2 = torch.zeros(batch_size * k, 9)
         context2[:, -1] = 1
         total_history = self.trainer_params["total_history"]
         feasibility_history = feasibility_history.view(-1, 1).expand(batch_size * k, total_history)
         action = None
-        best_reward, best_index = (obj[:, 0].view(batch_size, k)).min(-1)
         rec_best = rec.view(batch_size, k, -1)[torch.arange(batch_size),best_index,:].clone()
         is_improved = torch.zeros(batch_size).bool()
+        # log top k
+        self.metric_logger.improve_metrics["cons_tw_out_ratio"].update((out_penalty[:, 0] > 0).float().mean(), batch_size)
+        self.metric_logger.improve_metrics["cons_capacity_out_ratio"].update((out_penalty[:, 1] > 0).float().mean(),batch_size)
+        self.metric_logger.improve_metrics["cons_backhaul_out_ratio"].update((out_penalty[:, 2] > 0).float().mean(), batch_size)
+        self.metric_logger.improve_metrics["cons_dlout_ratio"].update((out_penalty[:, 3] > 0).float().mean(), batch_size)
+        self.metric_logger.improve_metrics["cons_out_ratio"].update((out_penalty>0).float().mean().item(), batch_size)
 
         # sample trajectory
         t = 0
@@ -707,20 +733,23 @@ class Trainer:
 
             # state transient
             rec, rewards, obj, feasibility_history, context, context2, info, out_penalty, out_node_penalty = env.improvement_step(rec, action, obj, feasibility_history, t,
-                                                                                             improvement_method = improvement_method,
+                                                                                             improvement_method = improvement_method, seperate_obj_penalty=self.trainer_params["seperate_obj_penalty"],
                                                                                              weights=weights, out_reward = self.trainer_params["out_reward"],
                                                                                              penalty_factor=self.lambda_, penalty_normalize=self.trainer_params["penalty_normalize"], insert_before=self.trainer_params["insert_before"])
 
-            # update best solution
-            new_best, best_index = obj[:, 0].view(batch_size, k).min(-1)
-            index = new_best < best_reward
-            best_reward[index] = new_best[index] # update best reward
-            is_improved = (is_improved | index)
-            rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size), best_index, :][index].clone() # update best solution
+            if self.trainer_params["bonus_for_construction"] or self.trainer_params["extra_bonus"]:
+                # update best solution
+                criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (obj[0]+obj[1]).clone()
+                new_best, best_index = criterion[:, 0].view(batch_size, k).min(-1)
+                index = new_best < best_reward
+                best_reward[index] = new_best[index] # update best reward
+                is_improved = (is_improved | index)
+                rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size), best_index, :][index].clone() # update best solution
 
             if self.model.training: batch_reward.append(rewards[:, 0].clone())
             memory.rewards.append(rewards)
-            memory.obj.append(obj.clone())
+            criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (obj[0] + obj[1]).clone()
+            memory.obj.append(criterion.clone())
             # if self.args.problem == "CVRP":
             #     memory.cum_demand.append(context[2])
             #     memory.partial_sum_wrt_route_plan.append(context[3])
@@ -811,27 +840,42 @@ class Trainer:
         out_node_penalty = torch.stack(memory.out_node_penalty)  # shape: (T, (c), batch*pomo)
         if self.args.problem == "VRPBLTW":
             min_out_penalty = out_penalty[:,0].min(dim=1)[0].float().mean()  # get best results from pomo
-            min_out_node_penalty = out_node_penalty[0].min(dim=1)[0].float().mean()  # get best results from pomo
-            self.metric_logger.improve_metrics["tw_out"].update(min_out_penalty.item(), batch_size)
-            self.metric_logger.improve_metrics["tw_out_nodes"].update(min_out_node_penalty.item(), batch_size)
+            min_out_node_penalty = out_node_penalty[:,0].min(dim=1)[0].float().mean()  # get best results from pomo
+            self.metric_logger.improve_metrics["tw_out"].update(out_penalty[:,0].mean().item(), batch_size)
+            self.metric_logger.improve_metrics["tw_out_nodes"].update(out_node_penalty[:,0].float().mean().item(), batch_size)
+            self.metric_logger.improve_metrics["tw_out_ratio"].update((out_penalty[:,0] > 0).float().mean(), batch_size)
+            # self.metric_logger.improve_metrics["tw_out"].update(min_out_penalty.item(), batch_size)
+            # self.metric_logger.improve_metrics["tw_out_nodes"].update(min_out_node_penalty.item(), batch_size)
             min_out_penalty = out_penalty[:,1].min(dim=1)[0].float().mean()  # get best results from pomo
-            min_out_node_penalty = out_node_penalty[1].min(dim=1)[0].float().mean()  # get best results from pomo
-            self.metric_logger.improve_metrics["capacity_out"].update(min_out_penalty.item(), batch_size)
-            self.metric_logger.improve_metrics["capacity_out_nodes"].update(min_out_node_penalty.item(), batch_size)
+            min_out_node_penalty = out_node_penalty[:,1].min(dim=1)[0].float().mean()  # get best results from pomo
+            self.metric_logger.improve_metrics["capacity_out"].update(out_penalty[:,1].mean().item(), batch_size)
+            self.metric_logger.improve_metrics["capacity_out_nodes"].update(out_node_penalty[:,1].float().mean().item(), batch_size)
+            self.metric_logger.improve_metrics["capacity_out_ratio"].update((out_penalty[:, 1] > 0).float().mean(), batch_size)
+            # self.metric_logger.improve_metrics["capacity_out"].update(min_out_penalty.item(), batch_size)
+            # self.metric_logger.improve_metrics["capacity_out_nodes"].update(min_out_node_penalty.item(), batch_size)
             min_out_penalty = out_penalty[:,2].min(dim=1)[0].float().mean()  # get best results from pomo
-            min_out_node_penalty = out_node_penalty[2].min(dim=1)[0].float().mean()  # get best results from pomo
-            self.metric_logger.improve_metrics["backhaul_out"].update(min_out_penalty.item(), batch_size)
-            self.metric_logger.improve_metrics["backhaul_out_nodes"].update(min_out_node_penalty.item(), batch_size)
+            min_out_node_penalty = out_node_penalty[:, 2].min(dim=1)[0].float().mean()  # get best results from pomo
+            self.metric_logger.improve_metrics["backhaul_out"].update(out_penalty[:,2].mean().item(), batch_size)
+            self.metric_logger.improve_metrics["backhaul_out_nodes"].update(out_node_penalty[:,2].float().mean().item(), batch_size)
+            self.metric_logger.improve_metrics["backhaul_out_ratio"].update((out_penalty[:, 2] > 0).float().mean(), batch_size)
+            # self.metric_logger.improve_metrics["backhaul_out"].update(min_out_penalty.item(), batch_size)
+            # self.metric_logger.improve_metrics["backhaul_out_nodes"].update(min_out_node_penalty.item(), batch_size)
             min_out_penalty = out_penalty[:,3].min(dim=1)[0].float().mean()  # get best results from pomo
-            min_out_node_penalty = out_node_penalty[3].min(dim=1)[0].float().mean()  # get best results from pomo
-            self.metric_logger.improve_metrics["dlout"].update(min_out_penalty.item(), batch_size)
-            self.metric_logger.improve_metrics["dlout_nodes"].update(min_out_node_penalty.item(), batch_size)
+            min_out_node_penalty = out_node_penalty[:,3].min(dim=1)[0].float().mean()  # get best results from pomo
+            self.metric_logger.improve_metrics["dlout"].update(out_penalty[:,3].mean().item(), batch_size)
+            self.metric_logger.improve_metrics["dlout_nodes"].update(out_node_penalty[:,3].float().mean().item(), batch_size)
+            self.metric_logger.improve_metrics["dlout_ratio"].update((out_penalty[:,3] > 0).float().mean(), batch_size)
+            # self.metric_logger.improve_metrics["dlout"].update(min_out_penalty.item(), batch_size)
+            # self.metric_logger.improve_metrics["dlout_nodes"].update(min_out_node_penalty.item(), batch_size)
             out_penalty = out_penalty.sum(1)
             out_node_penalty = out_node_penalty.sum(1)
         min_out_penalty = out_penalty.min(dim=1)[0].float().mean()  # get best results from pomo
         min_out_node_penalty = out_node_penalty.min(dim=1)[0].float().mean()  # get best results from pomo
-        self.metric_logger.improve_metrics["out"].update(min_out_penalty.item(), batch_size)
-        self.metric_logger.improve_metrics["out_nodes"].update(min_out_node_penalty.item(), batch_size)
+        self.metric_logger.improve_metrics["out"].update(out_penalty.float().mean().item(), batch_size)
+        self.metric_logger.improve_metrics["out_nodes"].update(out_node_penalty.float().mean().item(), batch_size)
+        self.metric_logger.improve_metrics["out_ratio"].update((out_penalty>0).float().mean().item(), batch_size)
+        # self.metric_logger.improve_metrics["out"].update(min_out_penalty.item(), batch_size)
+        # self.metric_logger.improve_metrics["out_nodes"].update(min_out_node_penalty.item(), batch_size)
 
         # calculate infeasible outputs (BSF during improvement)
         feasible_all = torch.stack(memory.feasible) # shape: (T, batch*pomo)
@@ -1098,9 +1142,12 @@ class Trainer:
             else:
                 if isinstance(reward, list):
                     try:
-                        reward = dist + self.penalty_factor * (total_timeout_reward + timeout_nodes_reward +
-                                                               total_out_of_dl_reward + out_of_dl_nodes_reward +
-                                                               total_out_of_capacity_reward + out_of_capacity_nodes_reward)
+                        if self.trainer_params["subgradient"]:
+                            reward = dist + self.lambda_[0] * (total_timeout_reward + timeout_nodes_reward) + self.lambda_[3] * (total_out_of_dl_reward + out_of_dl_nodes_reward) + self.lambda_[1] * (total_out_of_capacity_reward + out_of_capacity_nodes_reward)
+                        else:
+                            reward = dist + self.penalty_factor * (total_timeout_reward + timeout_nodes_reward +
+                                                                   total_out_of_dl_reward + out_of_dl_nodes_reward +
+                                                                   total_out_of_capacity_reward + out_of_capacity_nodes_reward)
                     except:
                         reward = dist +  self.penalty_factor * (total_timeout_reward +  timeout_nodes_reward)  # (batch, pomo)
                 if not self.trainer_params["out_reward"] and self.trainer_params["fsb_reward_only"]: #ATTENTION
@@ -1392,6 +1439,16 @@ class Trainer:
                     self.tb_logger.log_value("improvement_feasibility/dlout_nodes", self.metric_logger.improve_metrics["dlout_nodes"].avg, epoch)
                     self.tb_logger.log_value("improvement_feasibility/backhaul_out", self.metric_logger.improve_metrics["backhaul_out"].avg, epoch)
                     self.tb_logger.log_value("improvement_feasibility/backhaul_out_nodes", self.metric_logger.improve_metrics["backhaul_out_nodes"].avg, epoch)
+                    self.tb_logger.log_value("improvement_feasibility_ratio/tw_out_ratio", self.metric_logger.improve_metrics["tw_out_ratio"].avg, epoch)
+                    self.tb_logger.log_value("improvement_feasibility_ratio/capacity_out_ratio", self.metric_logger.improve_metrics["capacity_out_ratio"].avg, epoch)
+                    self.tb_logger.log_value("improvement_feasibility_ratio/backhaul_out_ratio", self.metric_logger.improve_metrics["backhaul_out_ratio"].avg, epoch)
+                    self.tb_logger.log_value("improvement_feasibility_ratio/dlout_ratio", self.metric_logger.improve_metrics["dlout_ratio"].avg, epoch)
+                    self.tb_logger.log_value("improvement_feasibility_ratio/out_ratio", self.metric_logger.improve_metrics["out_ratio"].avg, epoch)
+                    self.tb_logger.log_value("improvement_feasibility_ratio/cons_tw_out_ratio", self.metric_logger.improve_metrics["cons_tw_out_ratio"].avg, epoch)
+                    self.tb_logger.log_value("improvement_feasibility_ratio/cons_capacity_out_ratio", self.metric_logger.improve_metrics["cons_capacity_out_ratio"].avg, epoch)
+                    self.tb_logger.log_value("improvement_feasibility_ratio/cons_backhaul_out_ratio", self.metric_logger.improve_metrics["cons_backhaul_out_ratio"].avg, epoch)
+                    self.tb_logger.log_value("improvement_feasibility_ratio/cons_dlout_ratio", self.metric_logger.improve_metrics["cons_dlout_ratio"].avg, epoch)
+                    self.tb_logger.log_value("improvement_feasibility_ratio/cons_out_ratio", self.metric_logger.improve_metrics["cons_out_ratio"].avg, epoch)
             if self.trainer_params["fsb_dist_only"]:
                 self.tb_logger.log_value("improvement_feasibility/feasible_dist_mean", self.metric_logger.improve_metrics["feasible_dist_mean"].avg, epoch)
                 self.tb_logger.log_value("improvement_feasibility/feasible_dist_max_pomo_mean", self.metric_logger.improve_metrics["feasible_dist_max_pomo_mean"].avg, epoch)
@@ -1415,10 +1472,8 @@ class Trainer:
             'lambda_demand': self.metric_logger.lambda_demand.avg,
             'lambda_backhaul': self.metric_logger.lambda_backhaul.avg,
             'lambda_dl': self.metric_logger.lambda_dl.avg,
-            'construction_feasibility/solution_infeasible_rate': self.metric_logger.construct_metrics[
-                "sol_infeasible_rate"].avg,
-            'construction_feasibility/instance_infeasible_rate': self.metric_logger.construct_metrics[
-                "ins_infeasible_rate"].avg
+            'construction_feasibility/solution_infeasible_rate': self.metric_logger.construct_metrics["sol_infeasible_rate"].avg,
+            'construction_feasibility/instance_infeasible_rate': self.metric_logger.construct_metrics["ins_infeasible_rate"].avg
         }
 
         if self.trainer_params["out_reward"]:
@@ -1429,12 +1484,9 @@ class Trainer:
             if self.args.problem in ["OVRPBLTW", "OVRPLTW", "VRPBLTW"]:
                 log_data.update({
                     'construction_feasibility/dlout': self.metric_logger.construct_metrics["dlout"].avg,
-                    'construction_feasibility/dlout_nodes': self.metric_logger.construct_metrics[
-                        "dlout_nodes"].avg,
-                    'construction_feasibility/capacity_out': self.metric_logger.construct_metrics[
-                        "capacity_out"].avg,
-                    'construction_feasibility/capacity_out_nodes': self.metric_logger.construct_metrics[
-                        "capacity_out_nodes"].avg,
+                    'construction_feasibility/dlout_nodes': self.metric_logger.construct_metrics["dlout_nodes"].avg,
+                    'construction_feasibility/capacity_out': self.metric_logger.construct_metrics["capacity_out"].avg,
+                    'construction_feasibility/capacity_out_nodes': self.metric_logger.construct_metrics["capacity_out_nodes"].avg,
                 })
 
         if self.trainer_params["fsb_dist_only"]:
@@ -1455,22 +1507,16 @@ class Trainer:
             log_data.update({
                 'improvement/train_score_current': self.metric_logger.improve_metrics["current_score"].avg,
                 'improvement/train_score_bsf': self.metric_logger.improve_metrics["bsf_score"].avg,
-                'improvement/train_score_epsilon_fsb_bsf': self.metric_logger.improve_metrics[
-                    "epsilon_fsb_bsf_score"].avg,
+                'improvement/train_score_epsilon_fsb_bsf': self.metric_logger.improve_metrics["epsilon_fsb_bsf_score"].avg,
                 'improvement/train_improve_reward': self.metric_logger.improve_metrics["improve_reward"].avg,
                 'improvement/train_reg_reward': self.metric_logger.improve_metrics["reg_reward"].avg,
-                'improvement/train_bonus_reward': self.metric_logger.improve_metrics[
-                    "bonus_reward"].avg,
+                'improvement/train_bonus_reward': self.metric_logger.improve_metrics["bonus_reward"].avg,
                 'improvement/train_loss': self.metric_logger.improve_metrics["loss"].avg,
                 'improvement/entropy': self.metric_logger.improve_metrics["entropy"].avg,
-                'improvement_feasibility/solution_infeasible_rate': self.metric_logger.improve_metrics[
-                    "sol_infeasible_rate"].avg,
-                'improvement_feasibility/instance_infeasible_rate': self.metric_logger.improve_metrics[
-                    "ins_infeasible_rate"].avg,
-                'improvement_feasibility/epsilon_solution_infeasible_rate': self.metric_logger.improve_metrics[
-                    "soft_sol_infeasible_rate"].avg,
-                'improvement_feasibility/epsilon_instance_infeasible_rate': self.metric_logger.improve_metrics[
-                    "soft_ins_infeasible_rate"].avg,
+                'improvement_feasibility/solution_infeasible_rate': self.metric_logger.improve_metrics["sol_infeasible_rate"].avg,
+                'improvement_feasibility/instance_infeasible_rate': self.metric_logger.improve_metrics["ins_infeasible_rate"].avg,
+                'improvement_feasibility/epsilon_solution_infeasible_rate': self.metric_logger.improve_metrics["soft_sol_infeasible_rate"].avg,
+                'improvement_feasibility/epsilon_instance_infeasible_rate': self.metric_logger.improve_metrics["soft_ins_infeasible_rate"].avg,
             })
 
             if self.trainer_params["out_reward"]:
@@ -1488,18 +1534,24 @@ class Trainer:
                         'improvement_feasibility/dlout_nodes': self.metric_logger.improve_metrics["dlout_nodes"].avg,
                         'improvement_feasibility/backhaul_out': self.metric_logger.improve_metrics["backhaul_out"].avg,
                         'improvement_feasibility/backhaul_out_nodes': self.metric_logger.improve_metrics["backhaul_out_nodes"].avg,
+                        'improvement_feasibility_ratio/tw_out_ratio': self.metric_logger.improve_metrics["tw_out_ratio"].avg,
+                        'improvement_feasibility_ratio/capacity_out_ratio': self.metric_logger.improve_metrics["capacity_out_ratio"].avg,
+                        'improvement_feasibility_ratio/backhaul_out_ratio': self.metric_logger.improve_metrics["backhaul_out_ratio"].avg,
+                        'improvement_feasibility_ratio/dlout_ratio': self.metric_logger.improve_metrics["dlout_ratio"].avg,
+                        'improvement_feasibility_ratio/out_ratio': self.metric_logger.improve_metrics["out_ratio"].avg,
+                        'improvement_feasibility_ratio/cons_tw_out_ratio': self.metric_logger.improve_metrics["cons_tw_out_ratio"].avg,
+                        'improvement_feasibility_ratio/cons_capacity_out_ratio': self.metric_logger.improve_metrics["cons_capacity_out_ratio"].avg,
+                        'improvement_feasibility_ratio/cons_backhaul_out_ratio': self.metric_logger.improve_metrics["cons_backhaul_out_ratio"].avg,
+                        'improvement_feasibility_ratio/cons_dlout_ratio': self.metric_logger.improve_metrics["cons_dlout_ratio"].avg,
+                        'improvement_feasibility_ratio/cons_out_ratio': self.metric_logger.improve_metrics["cons_out_ratio"].avg,
                     })
 
             if self.trainer_params["fsb_dist_only"]:
                 log_data.update({
-                    'improvement_feasibility/feasible_dist_mean': self.metric_logger.improve_metrics[
-                        "feasible_dist_mean"].avg,
-                    'improvement_feasibility/feasible_dist_max_pomo_mean': self.metric_logger.improve_metrics[
-                        "feasible_dist_max_pomo_mean"].avg,
-                    'improvement_feasibility/epsilon_feasible_dist_mean': self.metric_logger.improve_metrics[
-                        "epsilon_feasible_dist_mean"].avg,
-                    'improvement_feasibility/epsilon_feasible_dist_max_pomo_mean':
-                        self.metric_logger.improve_metrics["epsilon_feasible_dist_max_pomo_mean"].avg,
+                    'improvement_feasibility/feasible_dist_mean': self.metric_logger.improve_metrics["feasible_dist_mean"].avg,
+                    'improvement_feasibility/feasible_dist_max_pomo_mean': self.metric_logger.improve_metrics["feasible_dist_max_pomo_mean"].avg,
+                    'improvement_feasibility/epsilon_feasible_dist_mean': self.metric_logger.improve_metrics["epsilon_feasible_dist_mean"].avg,
+                    'improvement_feasibility/epsilon_feasible_dist_max_pomo_mean': self.metric_logger.improve_metrics["epsilon_feasible_dist_max_pomo_mean"].avg,
                 })
 
         wandb.log(log_data, step=epoch)

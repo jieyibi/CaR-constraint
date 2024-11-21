@@ -606,6 +606,19 @@ class metric_logger:
             self.improve_metrics["backhaul_out_nodes"] = AverageMeter()
             self.improve_metrics["tw_out"] = AverageMeter()
             self.improve_metrics["tw_out_nodes"] = AverageMeter()
+
+            self.improve_metrics["tw_out_ratio"] = AverageMeter()
+            self.improve_metrics["capacity_out_ratio"] = AverageMeter()
+            self.improve_metrics["backhaul_out_ratio"] = AverageMeter()
+            self.improve_metrics["dlout_ratio"] = AverageMeter()
+            self.improve_metrics["out_ratio"] = AverageMeter()
+
+            self.improve_metrics["cons_tw_out_ratio"] = AverageMeter()
+            self.improve_metrics["cons_capacity_out_ratio"] = AverageMeter()
+            self.improve_metrics["cons_backhaul_out_ratio"] = AverageMeter()
+            self.improve_metrics["cons_dlout_ratio"] = AverageMeter()
+            self.improve_metrics["cons_out_ratio"] = AverageMeter()
+
             self.construct_metrics["dlout"] = AverageMeter()
             self.construct_metrics["dlout_nodes"] = AverageMeter()
             self.construct_metrics["capacity_out"] = AverageMeter()
@@ -879,4 +892,9 @@ class MultiTaskLoss(nn.Module):
         return weighted_loss
 
 
-
+def get_optimizer_step(optimizer):
+    step_list = [state['step'] for state in optimizer.state.values() if 'step' in state]
+    if step_list:
+        return max(step_list)
+    else:
+        return 0

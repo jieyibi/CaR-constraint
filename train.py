@@ -91,7 +91,7 @@ def args2dict(args):
                       "out_reward": args.out_reward, "out_node_reward":args.out_node_reward, "penalty_normalize": args.penalty_normalize,
                       "fsb_dist_only": args.fsb_dist_only, "fsb_reward_only":args.fsb_reward_only,
                       "infsb_dist_penalty": args.infsb_dist_penalty, "penalty_factor": args.penalty_factor, "reward_gating": args.reward_gating,
-                      "adaptive_primal_dual": args.adaptive_primal_dual, "constraint_number": args.constraint_number,
+                      "subgradient": args.subgradient, "subgradient_lr": args.subgradient_lr, "constraint_number": args.constraint_number,
                       # reward & loss
                       "bonus_for_construction": args.bonus_for_construction, "extra_bonus": args.extra_bonus, "extra_weight": args.extra_weight,
                       "diversity_loss": args.diversity_loss, "diversity_weight": args.diversity_weight, "probs_return": args.probs_return,
@@ -105,6 +105,7 @@ def args2dict(args):
                       "stochastic_probability": args.stochastic_probability, "select_strategy": args.select_strategy,
                       "select_top_k": args.select_top_k, "diversity": args.diversity,
                       "validation_improve_steps": args.validation_improve_steps,
+                      "seperate_obj_penalty": args.seperate_obj_penalty,
                       # polynet
                       "train_z_sample_size": args.train_z_sample_size, "val_z_sample_size": args.val_z_sample_size,
                       "amp_training": args.amp_training,
@@ -223,9 +224,10 @@ if __name__ == "__main__":
     parser.add_argument('--penalty_factor', type=float, default=1.0)
     parser.add_argument('--fsb_reward_plus', type=bool, default=False)
     parser.add_argument('--reward_gating', type=bool, default=False)
-    parser.add_argument('--adaptive_primal_dual', type=bool, default=False)
+    parser.add_argument('--subgradient', type=bool, default=False) # adaptive_primal_dual
+    parser.add_argument('--subgradient_lr', type=float, default=0.1)
     parser.add_argument('--constraint_number', type = int, default=4)
-    parser.add_argument('--gumbel', type=bool, default=True)
+    parser.add_argument('--gumbel', type=bool, default=False)
     # reward
     parser.add_argument('--baseline', type=str, choices=['group', "improve", "share"], default="group")# group reward: average rollout as baselines
     parser.add_argument('--bonus_for_construction', type=bool, default=False,
@@ -267,6 +269,7 @@ if __name__ == "__main__":
     parser.add_argument('--with_regular', type=bool, default=False)
     parser.add_argument('--with_bonus', type=bool, default=False)
     parser.add_argument('--with_local_bonus', type=bool, default=False) #todo: add bonus for meeting specific constraints
+    parser.add_argument('--seperate_obj_penalty', type=bool, default=True)
 
     # load
     parser.add_argument('--checkpoint', type=str, default=None)
@@ -282,7 +285,7 @@ if __name__ == "__main__":
     parser.add_argument('--occ_gpu', type=float, default=0., help="occupy (X)% GPU memory in advance, please use sparingly.")
     parser.add_argument('--tb_logger', type=bool, default=True)
     parser.add_argument('--wandb_logger', type=bool, default=True)
-    parser.add_argument('--clean_cache', type=bool, default=False)
+    parser.add_argument('--clean_cache', type=bool, default=True)
     parser.add_argument('--multi_processing', type=bool, default=False)
 
     args = parser.parse_args()
@@ -321,8 +324,11 @@ if __name__ == "__main__":
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_improveBonus_diversityLossV2Wp1"  #entropy
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_IL"#
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_extraBonus0p1"#
-    note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_Gumbel"#
+    # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_Gumbel"#
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversityLoss_IL"#
+    # note = "_VRPBLTW_Subgradient"  #
+    # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_Subgradient"#
+    note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_seperateObjPenalty" # neighbourhood search
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_NS" # neighbourhood search
     # note = "debug"
     # note = "test "
