@@ -6,11 +6,29 @@ from utils import *
 
 __all__ = ['VRPBLTWEnv']
 
+EPSILON_hardcoded = 3.67
+
 EPSILON = {
+    50: 3.67,
+}
+
+EPSILON_TW = {
     20: 0.74,
     50: 1.85,
     100: 3.7,
     200: 7.4
+}
+
+EPSILON_C ={#epsilon
+    20: 0.33,
+    50: 0.625,
+    100: 1.0,
+    200: 1.429
+}
+EPSILON_L={
+    50: 1.202,
+    100: 2.405,
+    200: 4.809
 }
 
 @dataclass
@@ -73,7 +91,6 @@ class VRPBLTWEnv:
         self.backhaul_ratio = 0.2
         self.problem_size = env_params['problem_size']
         self.pomo_size = env_params['pomo_size']
-        self.epsilon = EPSILON[self.problem_size]
         self.k_max = self.env_params['k_max'] if 'k_max' in env_params.keys() else None
         if 'pomo_start' in env_params.keys():
             self.pomo_size = env_params['pomo_size'] if env_params['pomo_start'] else env_params['train_z_sample_size']
@@ -632,7 +649,7 @@ class VRPBLTWEnv:
         # assert (self.visited_ninf_flag == float('-inf')).all(), "not visiting all nodes!"
         # assert torch.gather(~self.infeasible, 1, select_idx).all(), "not valid tour!"
 
-    def get_costs(self, rec, get_context=False, check_full_feasibility=False, out_reward=False, penalty_factor=1.0, penalty_normalize=False, seperate_obj_penalty=False):
+    def get_costs(self, rec, get_context=False, check_full_feasibility=False, out_reward=False, penalty_factor=1.0, penalty_normalize=False, seperate_obj_penalty=False, non_linear=None):
 
         k = rec.size(0) // self.depot_node_xy.size(0)
         self.dummy_size = rec.size(1) - self.problem_size
@@ -682,13 +699,19 @@ class VRPBLTWEnv:
 
         if out_reward:
             if isinstance(penalty_factor, torch.Tensor):
-                if seperate_obj_penalty:
+                if seperate_obj_penalty or non_linear=="step":
                     cost = [cost, (penalty_factor.unsqueeze(1) * (out_node_penalty + out_penalty)).sum(0)]
+                elif non_linear=="scalarization":
+                    penalty = (out_node_penalty + out_penalty).sum(0)
+                    cost = ((penalty)/(cost+penalty)) * cost + ((cost)/(cost+penalty)) * penalty
                 else:
                     cost = cost + (penalty_factor.unsqueeze(1) * (out_node_penalty + out_penalty)).sum(0)
             else:
-                if seperate_obj_penalty:
+                if seperate_obj_penalty or non_linear=="step":
                     cost = [cost, penalty_factor * (out_node_penalty.sum(0) + out_penalty.sum(0))]
+                elif non_linear=="scalarization":
+                    penalty = (out_node_penalty + out_penalty).sum(0)
+                    cost = ((penalty)/(cost+penalty)) * cost + ((cost)/(cost+penalty)) * penalty
                 else:
                     cost = cost + penalty_factor * (out_node_penalty.sum(0) + out_penalty.sum(0))
 
@@ -764,7 +787,7 @@ class VRPBLTWEnv:
 
         return visited_time, None, feature
 
-    def improvement_step(self, rec, action, obj, feasible_history, t, improvement_method = "kopt", weights=0, out_reward = False, penalty_factor=1., penalty_normalize=False, insert_before=True, seperate_obj_penalty=False):
+    def improvement_step(self, rec, action, obj, feasible_history, t, improvement_method = "kopt", epsilon=EPSILON_hardcoded, weights=0, out_reward = False, penalty_factor=1., penalty_normalize=False, insert_before=True, seperate_obj_penalty=False, non_linear=None):
 
         _, total_history = feasible_history.size()
         if seperate_obj_penalty:
@@ -781,26 +804,38 @@ class VRPBLTWEnv:
         else:
             raise NotImplementedError()
 
-        next_obj, context, out_penalty, out_node_penalty = self.get_costs(next_state, get_context=True, out_reward=out_reward, penalty_factor=penalty_factor, penalty_normalize=penalty_normalize, seperate_obj_penalty=seperate_obj_penalty)
+        next_obj, context, out_penalty, out_node_penalty = self.get_costs(next_state, get_context=True, out_reward=out_reward,
+                                                                          penalty_factor=penalty_factor, penalty_normalize=penalty_normalize,
+                                                                          seperate_obj_penalty=seperate_obj_penalty, non_linear=non_linear)
 
         # MDP step
         non_feasible_cost_total = out_penalty.sum(0)
+        # print(">>>>>>>>>>>>>>>>>", non_feasible_cost_total.mean(), non_feasible_cost_total.max(), non_feasible_cost_total.min())
         feasible = non_feasible_cost_total <= 0.0
-        soft_infeasible = (non_feasible_cost_total <= self.epsilon) & (non_feasible_cost_total > 0.)
+        soft_infeasible = (non_feasible_cost_total <= epsilon) & (non_feasible_cost_total > 0.)
+        # print(">>>>>>>>>>>>>>>>>", soft_infeasible.sum(), soft_infeasible.size())
 
         now_obj = pre_bsf.clone()
-        if seperate_obj_penalty:
+        if seperate_obj_penalty and non_linear!="step":
             next_obj, next_penalty_obj = next_obj
             now_penalty_obj = pre_penalty_bsf.clone()
+        elif non_linear == "step":
+            next_obj, next_penalty_obj = next_obj
 
         if not out_reward:
             # only update feasible obj
-            if seperate_obj_penalty: now_penalty_obj[feasible, 0] = next_penalty_obj[feasible].clone()
+            if seperate_obj_penalty and non_linear!="step": now_penalty_obj[feasible, 0] = next_penalty_obj[feasible].clone()
             now_obj[feasible, 0] = next_obj[feasible].clone()
         else:
             # update all obj, obj = cost + penalty
-            if seperate_obj_penalty: now_penalty_obj[:, 0] = next_penalty_obj.clone()
-            now_obj[:, 0] = next_obj.clone()
+            if seperate_obj_penalty and non_linear!="step": now_penalty_obj[:, 0] = next_penalty_obj.clone()
+            if non_linear is None:
+                now_obj[:, 0] = next_obj.clone()
+            elif non_linear in ["fixed_epsilon", "decayed_epsilon"]: # only have reward when penalty <= epsilon
+                now_obj[soft_infeasible, 0] = next_obj[soft_infeasible].clone()
+            elif non_linear == "step":
+                raise NotImplementedError
+
         # only update epsilon feasible obj
         now_obj[soft_infeasible, 1] = next_obj[soft_infeasible].clone()
         now_bsf = torch.min(pre_bsf, now_obj)

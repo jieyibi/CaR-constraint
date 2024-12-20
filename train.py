@@ -88,10 +88,14 @@ def args2dict(args):
                       "dynamic_coefficient": args.dynamic_coefficient,
                       # constraints
                       "soft_constrained": args.soft_constrained, "backhaul_mask": args.backhaul_mask,
-                      "out_reward": args.out_reward, "out_node_reward":args.out_node_reward, "penalty_normalize": args.penalty_normalize,
+                      "non_linear": args.non_linear, "non_linear_cons": args.non_linear_cons, "epsilon": args.epsilon,
+                      "epsilon_base": args.epsilon_base, "epsilon_decay_beta": args.epsilon_decay_beta,
+                      "out_reward": args.out_reward, "out_node_reward":args.out_node_reward,
+                      "penalty_normalize": args.penalty_normalize,
                       "fsb_dist_only": args.fsb_dist_only, "fsb_reward_only":args.fsb_reward_only,
-                      "infsb_dist_penalty": args.infsb_dist_penalty, "penalty_factor": args.penalty_factor, "reward_gating": args.reward_gating,
-                      "subgradient": args.subgradient, "subgradient_lr": args.subgradient_lr, "constraint_number": args.constraint_number,
+                      "infsb_dist_penalty": args.infsb_dist_penalty, "penalty_factor": args.penalty_factor,
+                      "reward_gating": args.reward_gating, "constraint_number": args.constraint_number,
+                      "subgradient": args.subgradient, "subgradient_lr": args.subgradient_lr,
                       # reward & loss
                       "bonus_for_construction": args.bonus_for_construction, "extra_bonus": args.extra_bonus, "extra_weight": args.extra_weight,
                       "diversity_loss": args.diversity_loss, "diversity_weight": args.diversity_weight, "probs_return": args.probs_return,
@@ -100,6 +104,7 @@ def args2dict(args):
                       "improvement_only": args.improvement_only, "init_sol_strategy": args.init_sol_strategy,
                       "max_dummy_size": args.max_dummy_size, "improve_start_when_dummy_ok": args.improve_start_when_dummy_ok,
                       "val_init_sol_strategy": args.val_init_sol_strategy,
+                      "neighborhood_search": args.neighborhood_search, "k_unconfident": args.k_unconfident,
                       "improvement_method": args.improvement_method, "rm_num": args.rm_num, "insert_before": args.insert_before,
                       "improve_steps": args.improve_steps, "total_history": args.total_history,
                       "stochastic_probability": args.stochastic_probability, "select_strategy": args.select_strategy,
@@ -215,6 +220,12 @@ if __name__ == "__main__":
     # constraints
     parser.add_argument('--soft_constrained', type=bool, default=True)
     parser.add_argument('--backhaul_mask', type=str, default="soft")
+    parser.add_argument('--non_linear', type=str, default=None, choices=[None, "fixed_epsilon", "decayed_epsilon", "step", "scalarization"])
+    # "step" means separating the target of cost and penalty during improvement training
+    parser.add_argument('--epsilon', type=float, default=3.67)
+    parser.add_argument('--epsilon_base', type=float, default=10.)
+    parser.add_argument('--epsilon_decay_beta', type=float, default=0.001)
+    parser.add_argument('--non_linear_cons', type=bool, default=False, help="enable non-linear reward function during construction")
     parser.add_argument('--out_reward', type=bool, default=True)
     parser.add_argument("--out_node_reward",type=bool,default=True)
     parser.add_argument("--penalty_normalize", type=bool, default=False)
@@ -239,7 +250,7 @@ if __name__ == "__main__":
     parser.add_argument('--diversity_weight', type=float, default=0.01)
     parser.add_argument('--probs_return', type=bool, default=False) # only calculate the entropy for the selected nodes when False
     # parser.add_argument('--select_top_k_grad', default=None, choices=[None, 10])
-    parser.add_argument('--imitation_learning', type=bool, default=False)
+    parser.add_argument('--imitation_learning', type=bool, default=True)
     parser.add_argument('--imitation_loss_weight', type=float, default=1.)
 
     # improvement
@@ -248,6 +259,8 @@ if __name__ == "__main__":
     parser.add_argument('--boundary', type=float, default=0.5)
     parser.add_argument('--insert_before', type=bool, default=True)
     parser.add_argument('--rm_num', type=int, default=1)
+    parser.add_argument('--neighborhood_search', type=bool, default=True)
+    parser.add_argument('--k_unconfident', type=int, default=10)
     parser.add_argument('--init_sol_strategy', type=str, default="POMO", choices=["random", "greedy_feasible", "random_feasible", "POMO"])
     parser.add_argument('--val_init_sol_strategy', type=str, default="POMO", choices=["random", "greedy_feasible", "random_feasible", "POMO"])
     parser.add_argument('--POMO_checkpoint', type=str, default="results/20240831_221004_TSPTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_construction_only/epoch-5000.pt")
@@ -269,7 +282,7 @@ if __name__ == "__main__":
     parser.add_argument('--with_regular', type=bool, default=False)
     parser.add_argument('--with_bonus', type=bool, default=False)
     parser.add_argument('--with_local_bonus', type=bool, default=False) #todo: add bonus for meeting specific constraints
-    parser.add_argument('--seperate_obj_penalty', type=bool, default=True)
+    parser.add_argument('--seperate_obj_penalty', type=bool, default=False)
 
     # load
     parser.add_argument('--checkpoint', type=str, default=None)
@@ -279,7 +292,7 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=2023)
     parser.add_argument('--log_dir', type=str, default="./results")
     parser.add_argument('--no_cuda', action='store_true')
-    parser.add_argument('--gpu_id', type=str, default="1")
+    parser.add_argument('--gpu_id', type=str, default="0")
     parser.add_argument('--world_size', type=int, default=1)
     parser.add_argument("--multiple_gpu", type=bool, default=False)
     parser.add_argument('--occ_gpu', type=float, default=0., help="occupy (X)% GPU memory in advance, please use sparingly.")
@@ -328,9 +341,10 @@ if __name__ == "__main__":
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversityLoss_IL"#
     # note = "_VRPBLTW_Subgradient"  #
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_Subgradient"#
-    note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_seperateObjPenalty" # neighbourhood search
-    # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_NS" # neighbourhood search
-    # note = "debug"
+    # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_seperateObjPenalty" # neighbourhood search
+    # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_NonLinear_scalarization_imprOnly" # neighbourhood search
+    # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_IL_NS" # neighbourhood search
+    note = "debug"
     # note = "test "
     if "debug" in note:
         args.wandb_logger = False

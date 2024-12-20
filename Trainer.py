@@ -24,6 +24,7 @@ import wandb
 import itertools
 import torch
 from collections import OrderedDict
+import numpy as np
 
 
 class Trainer:
@@ -130,6 +131,9 @@ class Trainer:
         if self.trainer_params["improve_start_when_dummy_ok"] and self.trainer_params["improve_steps"] > 0: print(">> Improvement will begin after the number of depots in the constructed routes is less than {}".format(self.trainer_params["max_dummy_size"]))
         for epoch in range(self.start_epoch, self.trainer_params['epochs']+1):
             if self.rank==0: print('================================================================================')
+            if self.trainer_params["non_linear"] == "decayed_epsilon":
+                self.trainer_params["epsilon"] = self.trainer_params["epsilon_base"] * np.exp(- self.trainer_params["epsilon_decay_beta"] * epoch)
+                print(f'>> Epsilon = {self.trainer_params["epsilon"]}')
 
             # if dummy <= max_dummy_size, begin to improve
             # print("{}, {}".format(improve_steps, validation_improve_steps))
@@ -425,8 +429,13 @@ class Trainer:
                                                                   aug_factor=1)
             else:
                 cons_reward = torch.stack(reward).sum(0)
-            cons_log_prob = prob_list.log().sum(dim=2) if self.trainer_params["baseline"] == "share" else None # (batch, pomo)
-            improve_loss, improve_reward, select_idx, best_solution, is_improved = self._improvement(env, cons_reward, batch_reward, weights, cons_log_prob)
+            if self.trainer_params["baseline"] == "share":
+                cons_log_prob = prob_list.log().sum(dim=2) # (batch, pomo)
+            elif self.trainer_params["neighborhood_search"]:
+                cons_log_prob = prob_list
+            else:
+                cons_log_prob = None
+            improve_loss, improve_reward, select_idx, best_solution, is_improved = self._improvement(env, self.trainer_params["epsilon"], cons_reward, batch_reward, weights, cons_log_prob)
             # if "TSP" not in self.args.problem: self.metric_logger.dummy_size.update(env.dummy_size, batch_size)
         else:
             improve_loss, improve_reward, select_idx, best_solution = 0.0, None, None, None
@@ -434,7 +443,7 @@ class Trainer:
 
         ###########################################Step & Return########################################
         if not self.model_params["improvement_only"]:
-            construct_loss = self._get_construction_output(infeasible, reward, prob_list, improve_reward, select_idx, probs_return_list)
+            construct_loss = self._get_construction_output(infeasible, reward, prob_list, improve_reward, select_idx, probs_return_list, self.trainer_params["epsilon"])
         else:
             construct_loss = 0.0, 0.0
 
@@ -670,7 +679,7 @@ class Trainer:
             if self.rank==0: print(f'Rank {self.rank} >> Val Score on {val_path}: [Construction] NO_AUG_Score: {self.val_metric_logger.construct_metrics["no_aug_score_list"]}, --> AUG_Score: {self.val_metric_logger.construct_metrics["aug_score_list"]}; Infeasible rate: {self.val_metric_logger.construct_metrics["sol_infeasible_rate_list"]}% (solution-level), {self.val_metric_logger.construct_metrics["ins_infeasible_rate_list"]}% (instance-level)')
             if self.rank==0 and self.trainer_params["validation_improve_steps"] > 0.: print(f'Rank {self.rank} >> Val Score on {val_path}: [Improvement] NO_AUG_Score: {self.val_metric_logger.improve_metrics["no_aug_score_list"]}, --> AUG_Score: {self.val_metric_logger.improve_metrics["aug_score_list"]}; Infeasible rate: {self.val_metric_logger.improve_metrics["sol_infeasible_rate_list"]}% (solution-level), {self.val_metric_logger.improve_metrics["ins_infeasible_rate_list"]}% (instance-level)')
 
-    def _improvement(self, env, cons_reward=None, batch_reward=None, weights=None, cons_log_prob=None):
+    def _improvement(self, env, epsilon=None, cons_reward=None, batch_reward=None, weights=None, cons_log_prob=None):
         amp_training = self.trainer_params['amp_training']
         # solution/rec shape: (batch, K, solution)
         solution = env.selected_node_list.clone() # shape: (batch, pomo, solution)
@@ -681,6 +690,9 @@ class Trainer:
                                                   diversity=self.trainer_params["diversity"])
             # solution shape: (batch, k, solution); solution_idx shape: (batch, k)
             feasibility_history = torch.gather(~env.infeasible, 1, select_idx)
+            if self.trainer_params["neighborhood_search"]:
+                cons_log_prob = cons_log_prob[torch.arange(env.batch_size)[:,None], select_idx]
+                _, unconfident_indices = torch.topk(cons_log_prob, k=self.trainer_params["k_unconfident"], dim=-1, largest=False)
         else:
             select_idx = torch.arange(env.pomo_size)[None, :].repeat(env.batch_size, 1)
             feasibility_history = ~env.infeasible
@@ -726,16 +738,17 @@ class Trainer:
             state = (env, rec, context, context2, action)
             if self.model_params["use_LoRA"] and t >= self.trainer_params["LoRA_begin_step"]: use_LoRA=True
             with torch.amp.autocast(device_type="cuda", enabled=amp_training):
-                action, log_lh, entro_p, improvement_method  = self.model(state, solver="improvement", require_entropy=True, use_LoRA=use_LoRA)
+                action, log_lh, entro_p, improvement_method = self.model(state, solver="improvement", require_entropy=True, use_LoRA=use_LoRA)
 
             if self.model.training: memory.logprobs.append(log_lh.clone())
             entropy.append(entro_p)
 
             # state transient
             rec, rewards, obj, feasibility_history, context, context2, info, out_penalty, out_node_penalty = env.improvement_step(rec, action, obj, feasibility_history, t,
-                                                                                             improvement_method = improvement_method, seperate_obj_penalty=self.trainer_params["seperate_obj_penalty"],
+                                                                                             improvement_method = improvement_method, epsilon = self.trainer_params["epsilon"],
+                                                                                             seperate_obj_penalty=self.trainer_params["seperate_obj_penalty"],
                                                                                              weights=weights, out_reward = self.trainer_params["out_reward"],
-                                                                                             penalty_factor=self.lambda_, penalty_normalize=self.trainer_params["penalty_normalize"], insert_before=self.trainer_params["insert_before"])
+                                                                                             penalty_factor=self.lambda_, penalty_normalize=self.trainer_params["penalty_normalize"], insert_before=self.trainer_params["insert_before"], non_linear=self.trainer_params["non_linear"])
 
             if self.trainer_params["bonus_for_construction"] or self.trainer_params["extra_bonus"]:
                 # update best solution
@@ -768,7 +781,7 @@ class Trainer:
             memory.out_node_penalty.append(out_node_penalty)  # (c, b*k)
             memory.out_penalty.append(out_penalty)  # (c, b*k)
             feasible = out_penalty.sum(0) <= 0.0
-            soft_infeasible = (out_penalty.sum(0) <= env.epsilon) & (out_penalty.sum(0) > 0.)
+            soft_infeasible = (out_penalty.sum(0) <= epsilon) & (out_penalty.sum(0) > 0.)
             memory.feasible.append(feasible)
             memory.soft_feasible.append(soft_infeasible)
 
@@ -1065,7 +1078,7 @@ class Trainer:
             # end update
             # memory.clear_memory()
 
-    def _get_construction_output(self, infeasible, reward, prob_list=None, improve_reward=None, select_idx=None, probs_return_list=None):
+    def _get_construction_output(self, infeasible, reward, prob_list=None, improve_reward=None, select_idx=None, probs_return_list=None, epsilon=None):
         # Input.shape
         # infeasible: (batch, pomo)
         # reward (list or tensor): (batch, pomo)
@@ -1145,9 +1158,21 @@ class Trainer:
                         if self.trainer_params["subgradient"]:
                             reward = dist + self.lambda_[0] * (total_timeout_reward + timeout_nodes_reward) + self.lambda_[3] * (total_out_of_dl_reward + out_of_dl_nodes_reward) + self.lambda_[1] * (total_out_of_capacity_reward + out_of_capacity_nodes_reward)
                         else:
-                            reward = dist + self.penalty_factor * (total_timeout_reward + timeout_nodes_reward +
-                                                                   total_out_of_dl_reward + out_of_dl_nodes_reward +
-                                                                   total_out_of_capacity_reward + out_of_capacity_nodes_reward)
+                            if self.trainer_params["non_linear_cons"]:
+                                penalty = (total_timeout_reward + timeout_nodes_reward +
+                                           total_out_of_dl_reward + out_of_dl_nodes_reward +
+                                           total_out_of_capacity_reward + out_of_capacity_nodes_reward)
+                                if self.trainer_params["non_linear"] == "scalarization":
+                                    reward = ((penalty) / (dist + penalty)) * dist + ((dist) / (dist + penalty)) * penalty
+                                elif self.trainer_params["non_linear"] in ["fixed_epsilon", "decayed_epsilon"]:
+                                    reward = dist + self.penalty_factor * penalty
+                                    reward = torch.where(penalty > epsilon, 10 * reward, reward) # todo: 10 is hardcoded
+                                else:
+                                    raise NotImplementedError
+                            else:
+                                reward = dist + self.penalty_factor * (total_timeout_reward + timeout_nodes_reward +
+                                                                       total_out_of_dl_reward + out_of_dl_nodes_reward +
+                                                                       total_out_of_capacity_reward + out_of_capacity_nodes_reward)
                     except:
                         reward = dist +  self.penalty_factor * (total_timeout_reward +  timeout_nodes_reward)  # (batch, pomo)
                 if not self.trainer_params["out_reward"] and self.trainer_params["fsb_reward_only"]: #ATTENTION
