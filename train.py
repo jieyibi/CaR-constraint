@@ -3,7 +3,6 @@ import argparse
 import pprint as pp
 from datetime import datetime
 import wandb
-wandb.login(key="d7c2a4d107302d1b34184fb17ca47aa6f84055ac")
 from Trainer import Trainer
 from utils import *
 import torch.distributed as dist
@@ -48,7 +47,7 @@ def args2dict(args):
     tester_params = {"eval_only": args.eval_only, "test_episodes": args.test_episodes,
                      "test_batch_size": args.test_batch_size, "test_dataset": args.test_dataset,
                      "test_z_sample_size": args.test_z_sample_size, "test_pomo_size": args.test_pomo_size,
-                     "sample_size": args.sample_size,
+                     "sample_size": args.sample_size, "aux_mask": args.aux_mask,
                     }
 
     model_params = {"embedding_dim": args.embedding_dim, "sqrt_embedding_dim": args.sqrt_embedding_dim,
@@ -160,6 +159,7 @@ if __name__ == "__main__":
     parser.add_argument('--test_z_sample_size', type=int, default=0)
     parser.add_argument('--eval_type', type=str, default="argmax", choices=["argmax", "softmax"])
     parser.add_argument('--sample_size', type=int, default = 1)
+    parser.add_argument('--aux_mask', type=bool, default=True)
 
     # model_params
     parser.add_argument('--model_type', type=str, default="SINGLE", choices=["SINGLE", "MTL", "MOE"])
@@ -219,13 +219,13 @@ if __name__ == "__main__":
 
     # constraints
     parser.add_argument('--soft_constrained', type=bool, default=True)
-    parser.add_argument('--backhaul_mask', type=str, default="soft")
-    parser.add_argument('--non_linear', type=str, default=None, choices=[None, "fixed_epsilon", "decayed_epsilon", "step", "scalarization"])
+    parser.add_argument('--backhaul_mask', type=str, default="soft", choices=["soft", "hard"])
+    parser.add_argument('--non_linear', type=str, default="decayed_epsilon", choices=[None, "fixed_epsilon", "decayed_epsilon", "step", "scalarization"])
     # "step" means separating the target of cost and penalty during improvement training
     parser.add_argument('--epsilon', type=float, default=3.67)
-    parser.add_argument('--epsilon_base', type=float, default=10.)
+    parser.add_argument('--epsilon_base', type=float, default=5.)
     parser.add_argument('--epsilon_decay_beta', type=float, default=0.001)
-    parser.add_argument('--non_linear_cons', type=bool, default=False, help="enable non-linear reward function during construction")
+    parser.add_argument('--non_linear_cons', type=bool, default=True, help="enable non-linear reward function during construction")
     parser.add_argument('--out_reward', type=bool, default=True)
     parser.add_argument("--out_node_reward",type=bool,default=True)
     parser.add_argument("--penalty_normalize", type=bool, default=False)
@@ -246,9 +246,9 @@ if __name__ == "__main__":
     parser.add_argument('--extra_bonus', type=bool, default=False,
                         help="add extra bonus for improving the solution (with good quality and can be improved)")
     parser.add_argument('--extra_weight', type=float, default=0.1)
-    parser.add_argument('--diversity_loss', type=bool, default=False)
+    parser.add_argument('--diversity_loss', type=bool, default=True)
     parser.add_argument('--diversity_weight', type=float, default=0.01)
-    parser.add_argument('--probs_return', type=bool, default=False) # only calculate the entropy for the selected nodes when False
+    parser.add_argument('--probs_return', type=bool, default=False) # only calculate the entropy for the selected nodes when False (v1)
     # parser.add_argument('--select_top_k_grad', default=None, choices=[None, 10])
     parser.add_argument('--imitation_learning', type=bool, default=True)
     parser.add_argument('--imitation_loss_weight', type=float, default=1.)
@@ -259,7 +259,7 @@ if __name__ == "__main__":
     parser.add_argument('--boundary', type=float, default=0.5)
     parser.add_argument('--insert_before', type=bool, default=True)
     parser.add_argument('--rm_num', type=int, default=1)
-    parser.add_argument('--neighborhood_search', type=bool, default=True)
+    parser.add_argument('--neighborhood_search', type=bool, default=False)
     parser.add_argument('--k_unconfident', type=int, default=10)
     parser.add_argument('--init_sol_strategy', type=str, default="POMO", choices=["random", "greedy_feasible", "random_feasible", "POMO"])
     parser.add_argument('--val_init_sol_strategy', type=str, default="POMO", choices=["random", "greedy_feasible", "random_feasible", "POMO"])
@@ -292,7 +292,7 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=2023)
     parser.add_argument('--log_dir', type=str, default="./results")
     parser.add_argument('--no_cuda', action='store_true')
-    parser.add_argument('--gpu_id', type=str, default="0")
+    parser.add_argument('--gpu_id', type=str, default="1")
     parser.add_argument('--world_size', type=int, default=1)
     parser.add_argument("--multiple_gpu", type=bool, default=False)
     parser.add_argument('--occ_gpu', type=float, default=0., help="occupy (X)% GPU memory in advance, please use sparingly.")
@@ -307,7 +307,6 @@ if __name__ == "__main__":
         args.load_optimizer = False
     if not args.eval_only: pp.pprint(vars(args))
 
-    # log_path = "/home/jieyi/unified_solver_1/results/20240919_035904_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP"
     log_path = None
     # note = "_VRPBLTW_rmPOMOstart_soft_backhaulHard_dual_decoder"
     # note = "_VRPBLTW_rmPOMOstart_soft_backhaulSoft_penaltyWeight1p5"
@@ -343,8 +342,13 @@ if __name__ == "__main__":
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_Subgradient"#
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_seperateObjPenalty" # neighbourhood search
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_NonLinear_scalarization_imprOnly" # neighbourhood search
-    # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_IL_NS" # neighbourhood search
-    note = "debug"
+    # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay5_0001_cons10l+p" #
+    # note = "_VRPBLTW_rmPOMOstart_Hard_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear3p67"
+    note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay5_0001_cons10l+p" #
+    # note = "_VRPBLTW100_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop3Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_diversity_IL"  #
+    # note = "_VRPBLTW100_rmPOMOstart_Soft_construction_only" #
+    # note = "_VRPBLTW100_rmPOMOstart_Hard_construction_only" #
+    # note = "debug"
     # note = "test "
     if "debug" in note:
         args.wandb_logger = False

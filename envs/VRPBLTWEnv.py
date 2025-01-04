@@ -6,10 +6,11 @@ from utils import *
 
 __all__ = ['VRPBLTWEnv']
 
-EPSILON_hardcoded = 3.67
+EPSILON_hardcoded = 7.105
 
 EPSILON = {
     50: 3.67,
+    100: 7.105,
 }
 
 EPSILON_TW = {

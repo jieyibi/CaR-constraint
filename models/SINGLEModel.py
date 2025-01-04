@@ -268,7 +268,7 @@ class SINGLEModel(nn.Module):
                 action, log_ll, entropy = self.decoder(solver = "improvement", h_em_final=h_em_final, rec=rec, context2 = context2, visited_time=visited_time, last_action = action,
                                                         fixed_action=fixed_action, require_entropy=require_entropy, improvement_method=improvement_method)
             else:
-                action, log_ll, entropy = self.kopt_decoder(h_em_final, rec, context2, visited_time, action, fixed_action=fixed_action, require_entropy=require_entropy)
+                action, log_ll, entropy = self.kopt_decoder(h_em_final, rec, context2, visited_time, action, fixed_action=fixed_action, require_entropy=require_entropy, improvement_method=improvement_method)
 
             # assert (visited_time == visited_time_clone).all()
             if require_entropy:
@@ -1040,6 +1040,7 @@ class kopt_Decoder(nn.Module):
         self.with_RNN = self.model_params['with_RNN']
         self.with_explore_stat_feature = self.model_params['with_explore_stat_feature']
         self.k_max = self.model_params['k_max']
+        self.rm_num = self.model_params["rm_num"]
 
         self.linear_K1 = nn.Linear(self.embedding_dim, self.embedding_dim, bias=False)
         self.linear_K2 = nn.Linear(self.embedding_dim, self.embedding_dim, bias=False)
@@ -1076,18 +1077,24 @@ class kopt_Decoder(nn.Module):
             stdv = 1. / math.sqrt(param.size(-1))
             param.data.uniform_(-stdv, stdv)
 
-    def forward(self, h, rec, context2, visited_time, last_action, fixed_action=None, require_entropy=False):
+    def forward(self, h, rec, context2, visited_time, last_action, improvement_method="kopt", fixed_action=None, require_entropy=False):
         # input: h_em_final, rec, context2, visited_time, action
         # h: comprehensive embeddings of each node, shape: (batch, dummy_graph_size, embedding_dim)
         # rec: solution in linked list, shape: (batch, dummy_graph_size)
         # context2: exploration statistics, shape: (batch, 9)
         # visited_time: visited time of each node, shape: (batch, dummy_graph_size)
         # last_action, shape: (batch, dummy_graph_size)
+        if improvement_method == "kopt":
+            improvement_actions_num = self.k_max
+        elif improvement_method == "rm_n_insert":
+            improvement_actions_num = self.rm_num * 2
+        else:  # TODO: add support for adaptive improvement
+            improvement_actions_num = 0
 
         bs, gs, _, ll, action, entropys = *h.size(), 0.0, None, []
-        action_index = torch.zeros(bs, self.k_max, dtype=torch.long).to(rec.device)
-        k_action_left = torch.zeros(bs, self.k_max + 1, dtype=torch.long).to(rec.device)
-        k_action_right = torch.zeros(bs, self.k_max, dtype=torch.long).to(rec.device)
+        action_index = torch.zeros(bs, improvement_actions_num, dtype=torch.long).to(rec.device)
+        k_action_left = torch.zeros(bs, improvement_actions_num + 1, dtype=torch.long).to(rec.device)
+        k_action_right = torch.zeros(bs, improvement_actions_num, dtype=torch.long).to(rec.device)
         next_of_last_action = torch.zeros_like(rec[:, :1], dtype=torch.long).to(rec.device) - 1
         mask = torch.zeros_like(rec, dtype=torch.bool).to(rec.device)
         stopped = torch.ones(bs, dtype=torch.bool).to(rec.device)
@@ -1108,7 +1115,7 @@ class kopt_Decoder(nn.Module):
             linear_V1 = self.linear_V1.view(1, -1).expand(bs, -1)
             linear_V2 = self.linear_V2.view(1, -1).expand(bs, -1)
 
-        for i in range(self.k_max):
+        for i in range(improvement_actions_num):
 
             # GRUs
             if self.with_RNN:
@@ -1144,7 +1151,7 @@ class kopt_Decoder(nn.Module):
             else:
                 action = fixed_action[:, i:i + 1]
 
-            if i > 0:
+            if i > 0 and improvement_method == "kopt":
                 action = torch.where(stopped.unsqueeze(-1), action_index[:, :1], action)
 
             # Record log_likelihood and Entropy
@@ -1160,48 +1167,73 @@ class kopt_Decoder(nn.Module):
                         entropys.append(dist.entropy())
 
             # Store and Process actions
-            next_of_new_action = rec.gather(1, action)
-            action_index[:, i] = action.squeeze().clone()
-            k_action_left[stopped, i] = action[stopped].squeeze().clone()
-            k_action_right[~stopped, i - 1] = action[~stopped].squeeze().clone()
-            k_action_left[:, i + 1] = next_of_new_action.squeeze().clone()
+            if improvement_method == "kopt":
+                next_of_new_action = rec.gather(1, action)
+                action_index[:, i] = action.squeeze().clone()
+                k_action_left[stopped, i] = action[stopped].squeeze().clone()
+                k_action_right[~stopped, i - 1] = action[~stopped].squeeze().clone()
+                k_action_left[:, i + 1] = next_of_new_action.squeeze().clone()
 
-            # Prepare next RNN input
-            input_q1 = h.gather(1, action.view(bs, 1, 1).expand(bs, 1, self.embedding_dim)).squeeze(1)
-            input_q2 = torch.where(stopped.view(bs, 1).expand(bs, self.embedding_dim), input_q1.clone(),
-                                   h.gather(1, (next_of_last_action % gs).view(bs, 1, 1).expand(bs, 1, self.embedding_dim)).squeeze(1))
+                # Prepare next RNN input
+                input_q1 = h.gather(1, action.view(bs, 1, 1).expand(bs, 1, self.embedding_dim)).squeeze(1)
+                input_q2 = torch.where(stopped.view(bs, 1).expand(bs, self.embedding_dim), input_q1.clone(),
+                                       h.gather(1, (next_of_last_action % gs).view(bs, 1, 1).expand(bs, 1, self.embedding_dim)).squeeze(1))
 
-            # Process if k-opt close
-            # assert (input_q1[stopped] == input_q2[stopped]).all()
-            if i > 0:
-                stopped = stopped | (action == next_of_last_action).squeeze()
-            else:
-                stopped = (action == next_of_last_action).squeeze()
-            # assert (input_q1[stopped] == input_q2[stopped]).all()
+                # Process if k-opt close
+                # assert (input_q1[stopped] == input_q2[stopped]).all()
+                if i > 0:
+                    stopped = stopped | (action == next_of_last_action).squeeze()
+                else:
+                    stopped = (action == next_of_last_action).squeeze()
+                # assert (input_q1[stopped] == input_q2[stopped]).all()
 
-            k_action_left[stopped, i] = k_action_left[stopped, i - 1]
-            k_action_right[stopped, i] = k_action_right[stopped, i - 1]
+                k_action_left[stopped, i] = k_action_left[stopped, i - 1]
+                k_action_right[stopped, i] = k_action_right[stopped, i - 1]
 
-            # Calc next basic masks
-            if i == 0:
-                visited_time_tag = (visited_time - visited_time.gather(1, action)) % gs
-            mask &= False
-            mask[(visited_time_tag <= visited_time_tag.gather(1, action))] = True
-            if i == 0:
-                mask[visited_time_tag > (gs - 2)] = True
-            mask[stopped, action[stopped].squeeze()] = False  # allow next k-opt starts immediately
-            # if True:#i == self.k_max - 2: # allow special case: close k-opt at the first selected node
-            index_allow_first_node = (~stopped) & (next_of_new_action.squeeze() == action_index[:, 0])
-            mask[index_allow_first_node, action_index[index_allow_first_node, 0]] = False
+                # Calc next basic masks
+                if i == 0:
+                    visited_time_tag = (visited_time - visited_time.gather(1, action)) % gs
+                mask &= False
+                mask[(visited_time_tag <= visited_time_tag.gather(1, action))] = True
+                if i == 0:
+                    mask[visited_time_tag > (gs - 2)] = True
+                mask[stopped, action[stopped].squeeze()] = False  # allow next k-opt starts immediately
+                # if True:#i == self.k_max - 2: # allow special case: close k-opt at the first selected node
+                index_allow_first_node = (~stopped) & (next_of_new_action.squeeze() == action_index[:, 0])
+                mask[index_allow_first_node, action_index[index_allow_first_node, 0]] = False
 
-            # Move to next
-            next_of_last_action = next_of_new_action
-            next_of_last_action[stopped] = -1
+                # Move to next
+                next_of_last_action = next_of_new_action
+                next_of_last_action[stopped] = -1
+            else:  # remove and insert
+                action_index[:, i] = action.squeeze().clone()
+                mask = torch.zeros_like(rec, dtype=torch.bool).to(rec.device)  # re-initialize mask
+                if i % 2 == 0:  # removal move -> mask some insertion nodes for the next iteration
+                    # mask 1: mask out removed nodes
+                    mask[torch.arange(bs), action.squeeze()] = True
+                    # mask 2: mask out the previous nodes of the removed nodes
+                    previous_nodes = get_previous_nodes(rec, action)
+                    mask[torch.arange(bs), previous_nodes.squeeze()] = True
+                    # mask 3: mask out the other depots if the removed node is a depot node?
+                    dummy_size = gs - self.model_params["problem_size"]
+                    is_depot = (action < dummy_size).squeeze()
+                    depot_mask = torch.zeros_like(mask, dtype=torch.bool)
+                    depot_mask[:, :dummy_size] = True  # Mask all depot nodes
+                    mask[is_depot] |= depot_mask[is_depot]
+                else:  # insertion move -> mask some removal nodes for the next iteration
+                    # Todo: consider dynamic stopping for removal
+                    # mask the previous removal nodes
+                    indices = torch.arange(i)[(torch.arange(i) % 2) == 0]
+                    selected_action_indices = action_index[:, indices]
+                    mask[torch.arange(bs)[:, None], selected_action_indices] = True
 
         # Form final action
-        k_action_right[~stopped, -1] = k_action_left[~stopped, -1].clone()
-        k_action_left = k_action_left[:, :self.k_max]
-        action_all = torch.cat((action_index, k_action_left, k_action_right), -1)
+        if improvement_method == "kopt":
+            k_action_right[~stopped, -1] = k_action_left[~stopped, -1].clone()
+            k_action_left = k_action_left[:, :self.k_max]
+            action_all = torch.cat((action_index, k_action_left, k_action_right), -1)
+        else:# rm and insert
+            action_all = action_index.clone()
 
         return action_all, ll, torch.stack(entropys).mean(0) if require_entropy and self.training else None
 

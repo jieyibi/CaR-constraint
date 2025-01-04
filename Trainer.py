@@ -46,6 +46,8 @@ class Trainer:
         self.result_log = {"val_score": [], "val_gap": [], "val_infsb_rate": []}
         if self.trainer_params["validation_improve_steps"] > 0.:
             self.result_log.update({"val_score_improve": [], "val_gap_improve": [], "val_infsb_rate_improve": []})
+        if self.tester_params["aux_mask"]:
+            self.result_log.update({"rc_val_score": [], "rc_val_gap": [], "rc_val_infsb_rate": []})
         if args.tb_logger and rank == 0:
             self.tb_logger = TbLogger(self.log_path)
         else:
@@ -271,6 +273,14 @@ class Trainer:
                                                                  self.val_metric_logger.improve_metrics["aug_gap_list"]))
             print("Solution level Infeasible rate: {:.3f}%".format(self.val_metric_logger.improve_metrics["sol_infeasible_rate_list"]))
             print("Instance level Infeasible rate: {:.3f}%".format(self.val_metric_logger.improve_metrics["ins_infeasible_rate_list"]))
+
+            print(" \n*** Re-Construction w. mask *** ")
+            print(" NO-AUG SCORE: {}, Gap: {:.4f} ".format(self.val_metric_logger.reconstruct_metrics["no_aug_score_list"],
+                                                           self.val_metric_logger.reconstruct_metrics["no_aug_gap_list"]))
+            print(" AUGMENTATION SCORE: {}, Gap: {:.4f} ".format(self.val_metric_logger.reconstruct_metrics["aug_score_list"],
+                                                                 self.val_metric_logger.reconstruct_metrics["aug_gap_list"]))
+            print("Solution level Infeasible rate: {:.3f}%".format(self.val_metric_logger.reconstruct_metrics["sol_infeasible_rate_list"]))
+            print("Instance level Infeasible rate: {:.3f}%".format(self.val_metric_logger.reconstruct_metrics["ins_infeasible_rate_list"]))
 
             if not self.env_params["pomo_start"] and self.tester_params["test_z_sample_size"] == 0:
                 self.env_params["pomo_size"] = init_pomo_size
@@ -588,25 +598,18 @@ class Trainer:
             ###########################################Construction########################################
             if self.rank==0: tik = time.time()
             if not self.model_params["improvement_only"]:
-                if self.model_params["polynet"]:
-                    z = self.sample_z_vectors(batch_size * aug_factor, starting_points, z_dim, z_sample_size,
-                                              rollout_size)
-                else:
-                    z = None
+                z = self.sample_z_vectors(batch_size * aug_factor, starting_points, z_dim, z_sample_size, rollout_size)  if self.model_params["polynet"] else None
                 try:
                     self.model.module.pre_forward(reset_state, z)
                 except:
                     self.model.pre_forward(reset_state, z)
-
                 while not done:
-                    selected, _, _ = self.model(state, pomo=self.env_params["pomo_start"],
-                                                candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None)
+                    selected, _, _ = self.model(state, pomo=self.env_params["pomo_start"], candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None)
                     # shape: (batch, pomo)
-                    state, reward, done, infeasible = env.step(selected,
-                                                               soft_constrained = self.trainer_params["soft_constrained"],
+                    state, reward, done, infeasible = env.step(selected, soft_constrained = self.trainer_params["soft_constrained"],
                                                                backhaul_mask = self.trainer_params["backhaul_mask"])
                 # Return
-                self._get_construction_output_val(aug_factor, infeasible, reward)
+                aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible = self._get_construction_output_val(aug_factor, infeasible, reward)
             if self.rank==0: print(f"Rank {self.rank} >> val construction time: ", time.time() - tik)
             ###########################################Improvement########################################
             if self.trainer_params["validation_improve_steps"] > 0.:
@@ -621,8 +624,27 @@ class Trainer:
                         self._get_construction_output_val(aug_factor, env.infeasible, env._get_travel_distance())
                     else:
                         self._get_pomo_initial_solution(env, data, batch_size, rollout_size, eval_type="argmax", aug_factor=aug_factor, val=True)
-                self._val_improvement(env, aug_factor)
+                aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible = self._val_improvement(env, aug_factor) # after construction and improvement
                 if self.rank==0: print(f"Rank {self.rank} >> val improvement time: ", time.time() - tik)
+            #############################Use mask to construct the solutions again###################################
+            if self.model_params["problem"] == "VRPBLTW" and self.tester_params["aux_mask"]:
+                if self.rank==0: tik = time.time()
+                # reconstruct the solution (env already load problem)
+                reset_state, _, _ = env.reset()
+                state, reward, done = env.pre_step()
+                if not self.model_params["improvement_only"]:
+                    z = self.sample_z_vectors(batch_size * aug_factor, starting_points, z_dim, z_sample_size, rollout_size) if self.model_params["polynet"] else None
+                    try:
+                        self.model.module.pre_forward(reset_state, z)
+                    except:
+                        self.model.pre_forward(reset_state, z)
+                    while not done:
+                        selected, _, _ = self.model(state, pomo=self.env_params["pomo_start"], candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None)
+                        # shape: (batch, pomo)
+                        state, reward, done, infeasible = env.step(selected, soft_constrained = False, backhaul_mask = "hard")
+                    # Obtain the minimal feasible reward
+                    self._supplement_construction(aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, aug_factor, infeasible, reward)
+                if self.rank==0: print(f"Rank {self.rank} >> val re-construction time: ", time.time() - tik)
 
     def _val_and_stat(self, dir, val_path, env, batch_size=500, val_episodes=1000, compute_gap=False, epoch=1):
 
@@ -672,12 +694,15 @@ class Trainer:
             try:
                 if self.rank==0: print(f'Rank {self.rank} >> Val Score on {val_path}: [Construction] NO_AUG_Score: {self.val_metric_logger.construct_metrics["no_aug_score_list"]}, NO_AUG_Gap: {self.val_metric_logger.construct_metrics["no_aug_gap_list"]}% --> AUG_Score: {self.val_metric_logger.construct_metrics["aug_score_list"]}, AUG_Gap: {self.val_metric_logger.construct_metrics["aug_gap_list"]}%; Infeasible rate: {self.val_metric_logger.construct_metrics["sol_infeasible_rate_list"]}% (solution-level), {self.val_metric_logger.construct_metrics["ins_infeasible_rate_list"]}% (instance-level)')
                 if self.rank==0 and self.trainer_params["validation_improve_steps"] > 0.: print(f'Rank {self.rank} >> Val Score on {val_path}: [Improvement] NO_AUG_Score: {self.val_metric_logger.improve_metrics["no_aug_score_list"]}, NO_AUG_Gap: {self.val_metric_logger.improve_metrics["no_aug_gap_list"]}% --> AUG_Score: {self.val_metric_logger.improve_metrics["aug_score_list"]}, AUG_Gap: {self.val_metric_logger.improve_metrics["aug_gap_list"]}%; Infeasible rate: {self.val_metric_logger.improve_metrics["sol_infeasible_rate_list"]}% (solution-level), {self.val_metric_logger.improve_metrics["ins_infeasible_rate_list"]}% (instance-level)')
+                if self.rank==0 and self.tester_params["aux_mask"]: print(f'Rank {self.rank} >> Val Score on {val_path}: [w. mask] NO_AUG_Score: {self.val_metric_logger.reconstruct_metrics["no_aug_score_list"]}, NO_AUG_Gap: {self.val_metric_logger.reconstruct_metrics["no_aug_gap_list"]}% --> AUG_Score: {self.val_metric_logger.reconstruct_metrics["aug_score_list"]}, AUG_Gap: {self.val_metric_logger.reconstruct_metrics["aug_gap_list"]}%; Infeasible rate: {self.val_metric_logger.reconstruct_metrics["sol_infeasible_rate_list"]}% (solution-level), {self.val_metric_logger.reconstruct_metrics["ins_infeasible_rate_list"]}% (instance-level)')
             except:
                 if self.rank==0: print(f'Rank {self.rank} >> Val Score on {val_path}: [Construction] NO_AUG_Score: {self.val_metric_logger.construct_metrics["no_aug_score_list"]}, NO_AUG_Gap: {self.val_metric_logger.construct_metrics["no_aug_gap_list"]}% --> AUG_Score: {self.val_metric_logger.construct_metrics["aug_score_list"]}, AUG_Gap: {self.val_metric_logger.construct_metrics["aug_gap_list"]}%')
                 if self.rank == 0 and self.trainer_params["validation_improve_steps"] > 0.: print(f'Rank {self.rank} >> Val Score on {val_path}: [Improvement] NO_AUG_Score: {self.val_metric_logger.improve_metrics["no_aug_score_list"]}, NO_AUG_Gap: {self.val_metric_logger.improve_metrics["no_aug_gap_list"]}% --> AUG_Score: {self.val_metric_logger.improve_metrics["aug_score_list"]}, AUG_Gap: {self.val_metric_logger.improve_metrics["aug_gap_list"]}%')
+                if self.rank == 0 and self.tester_params["aux_mask"]: print(f'Rank {self.rank} >> Val Score on {val_path}: [w. mask] NO_AUG_Score: {self.val_metric_logger.reconstruct_metrics["no_aug_score_list"]}, NO_AUG_Gap: {self.val_metric_logger.reconstruct_metrics["no_aug_gap_list"]}% --> AUG_Score: {self.val_metric_logger.reconstruct_metrics["aug_score_list"]}, AUG_Gap: {self.val_metric_logger.reconstruct_metrics["aug_gap_list"]}%')
         else:
             if self.rank==0: print(f'Rank {self.rank} >> Val Score on {val_path}: [Construction] NO_AUG_Score: {self.val_metric_logger.construct_metrics["no_aug_score_list"]}, --> AUG_Score: {self.val_metric_logger.construct_metrics["aug_score_list"]}; Infeasible rate: {self.val_metric_logger.construct_metrics["sol_infeasible_rate_list"]}% (solution-level), {self.val_metric_logger.construct_metrics["ins_infeasible_rate_list"]}% (instance-level)')
             if self.rank==0 and self.trainer_params["validation_improve_steps"] > 0.: print(f'Rank {self.rank} >> Val Score on {val_path}: [Improvement] NO_AUG_Score: {self.val_metric_logger.improve_metrics["no_aug_score_list"]}, --> AUG_Score: {self.val_metric_logger.improve_metrics["aug_score_list"]}; Infeasible rate: {self.val_metric_logger.improve_metrics["sol_infeasible_rate_list"]}% (solution-level), {self.val_metric_logger.improve_metrics["ins_infeasible_rate_list"]}% (instance-level)')
+            if self.rank==0 and self.tester_params["aux_mask"]: print(f'Rank {self.rank} >> Val Score on {val_path}: [w. mask] NO_AUG_Score: {self.val_metric_logger.reconstruct_metrics["no_aug_score_list"]}, --> AUG_Score: {self.val_metric_logger.reconstruct_metrics["aug_score_list"]}; Infeasible rate: {self.val_metric_logger.reconstruct_metrics["sol_infeasible_rate_list"]}% (solution-level), {self.val_metric_logger.reconstruct_metrics["ins_infeasible_rate_list"]}% (instance-level)')
 
     def _improvement(self, env, epsilon=None, cons_reward=None, batch_reward=None, weights=None, cons_log_prob=None):
         amp_training = self.trainer_params['amp_training']
@@ -956,13 +981,13 @@ class Trainer:
             # initial solution from construction
             feasible_all = ((~env.infeasible).view(-1)).int()
             min_scores = torch.full((batch_size * pomo_size,), float('inf'))
-            min_scores = torch.where(feasible_all.bool(), obj[:, 0], min_scores)
+            min_scores = torch.where(feasible_all.bool(), obj[:, 0], min_scores).clone()
             out_node_penalties = torch.full((batch_size * pomo_size,), float('inf'))
             # if self.args.problem == "CVRP":
             #     out_node_penalty = (context[2] > 1.00001).sum(-1)
             # elif self.args.problem == "TSPTW":
             #     out_node_penalty = (torch.clamp_min(context[1] - context[-1], 0.0) > 1e-5).sum(-1) # (b*k)
-            out_node_penalties = torch.where(~(feasible_all.bool()), out_node_penalty, out_node_penalties)
+            out_node_penalties = torch.where(~(feasible_all.bool()), out_node_penalty, out_node_penalties).clone()
             del out_node_penalty
             out_penalties = torch.full((batch_size * pomo_size,), float('inf'))
             # if self.args.problem == "CVRP":
@@ -974,7 +999,7 @@ class Trainer:
             #             out_penalty = out_penalty / context[-1][:, 0]
             #         except:
             #             out_penalty = out_penalty / context[-1][:, :1]
-            out_penalties = torch.where(~(feasible_all.bool()), out_penalty, out_penalties)
+            out_penalties = torch.where(~(feasible_all.bool()), out_penalty, out_penalties).clone()
             del out_penalty
 
             while t < T:
@@ -1008,7 +1033,7 @@ class Trainer:
                 feasible = out_penalty.sum(0) <= 0.0
                 feasible_all += feasible.int()
                 # Update scores with current step's results
-                min_scores = torch.where(feasible, torch.min(min_scores, obj[:, 0]), min_scores)
+                min_scores = torch.where(feasible, torch.min(min_scores, obj[:, 0]), min_scores).clone()
 
                 # Update out_node_penalties and out_penalties
                 # if self.args.problem == "CVRP":
@@ -1023,8 +1048,8 @@ class Trainer:
                 #         except:
                 #             current_out_penalty = current_out_penalty / context[-1][:, :1]
                 #     current_out_node_penalty = (torch.clamp_min(context[1] - context[-1], 0.0) > 1e-5).sum(-1)  # (b*k)
-                out_node_penalties = torch.min(out_node_penalties, out_node_penalty.sum(0))
-                out_penalties = torch.min(out_penalties, out_penalty.sum(0))
+                out_node_penalties = torch.min(out_node_penalties, out_node_penalty.sum(0)).clone()
+                out_penalties = torch.min(out_penalties, out_penalty.sum(0)).clone()
 
                 # next
                 t = t + 1
@@ -1077,6 +1102,8 @@ class Trainer:
 
             # end update
             # memory.clear_memory()
+
+            return aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible
 
     def _get_construction_output(self, infeasible, reward, prob_list=None, improve_reward=None, select_idx=None, probs_return_list=None, epsilon=None):
         # Input.shape
@@ -1354,7 +1381,7 @@ class Trainer:
             self.val_metric_logger.construct_metrics["ins_infeasible_rate"].update(ins_infsb_rate, batch_size)
 
             reward_masked = aug_reward.masked_fill(infeasible, -1e10)
-            fsb_no_aug = reward_masked[0,:,:].max(dim=1, keepdim=True).values
+            fsb_no_aug = reward_masked[0,:,:].max(dim=1).values
             fsb_aug = reward_masked.max(dim=0).values.max(dim=-1).values
             no_aug_score, aug_score = -fsb_no_aug, -fsb_aug
         else:
@@ -1366,6 +1393,59 @@ class Trainer:
 
         self.val_metric_logger._construct_tensor_update("no_aug_score", no_aug_score)
         self.val_metric_logger._construct_tensor_update("aug_score", aug_score)
+
+        return aug_score, no_aug_score, aug_feasible, no_aug_feasible
+
+    def _supplement_construction(self, aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, aug_factor, infeasible, reward):
+        # all feasible solutions
+        if isinstance(reward, list):
+            try:
+                dist_reward, _, _ = reward
+                batch_size, pomo_size = dist_reward.size()
+                batch_size = batch_size // aug_factor
+            except:
+                dist_reward, _, _, _, _, _, _ = reward
+                batch_size, pomo_size = dist_reward.size()
+                batch_size = batch_size // aug_factor
+            dist = dist_reward.clone()
+        else:
+            dist = reward
+
+        batch_size, pomo_size = dist.size()
+        batch_size = batch_size // aug_factor
+        aug_reward = dist.reshape(aug_factor, batch_size, pomo_size)
+        infeasible = infeasible.reshape(aug_factor, batch_size, pomo_size)
+        # shape: (augmentation, batch, pomo)
+
+        if self.trainer_params["fsb_dist_only"]:
+            reward_masked = aug_reward.masked_fill(infeasible, -1e10)
+            fsb_no_aug = reward_masked[0,:,:].max(dim=1).values
+            fsb_aug = reward_masked.max(dim=0).values.max(dim=-1).values
+            rc_no_aug_score, rc_aug_score = -fsb_no_aug, -fsb_aug
+            # shape: (augmentation, batch, pomo)
+            rc_no_aug_feasible = (infeasible[0, :, :] == False).any(dim=-1)
+            rc_aug_feasible = (infeasible == False).any(dim=0).any(dim=-1)
+            # merge the reconstrcuted feasible solutions with the original (construct-then-improve) ones
+            no_aug_score_fsb = torch.where(rc_no_aug_feasible, torch.min(rc_no_aug_score, no_aug_score_fsb), no_aug_score_fsb)
+            aug_score_fsb = torch.where(rc_aug_feasible, torch.min(rc_aug_score, aug_score_fsb), aug_score_fsb)
+            aug_feasible = aug_feasible | rc_aug_feasible
+            no_aug_feasible = no_aug_feasible | rc_no_aug_feasible
+            self.val_metric_logger._reconstruct_tensor_update("no_aug_feasible", no_aug_feasible)
+            self.val_metric_logger._reconstruct_tensor_update("aug_feasible", aug_feasible)
+            sol_infsb_rate = infeasible.sum() / (batch_size * pomo_size * aug_factor)
+            ins_infsb_rate = 1. - aug_feasible.sum() / batch_size
+            self.val_metric_logger.reconstruct_metrics["sol_infeasible_rate"].update(sol_infsb_rate, batch_size)
+            self.val_metric_logger.reconstruct_metrics["ins_infeasible_rate"].update(ins_infsb_rate, batch_size)
+        else:
+            raise NotImplementedError("Not checked yet")
+            # max_pomo_reward, _ = aug_reward.max(dim=2)
+            # no_aug_score = -max_pomo_reward[0, :].float()
+            # max_aug_pomo_reward, _ = max_pomo_reward.max(dim=0)
+            # aug_score = -max_aug_pomo_reward.float()
+            # infeasible_output = infeasible
+
+        self.val_metric_logger._reconstruct_tensor_update("no_aug_score", no_aug_score_fsb)
+        self.val_metric_logger._reconstruct_tensor_update("aug_score", aug_score_fsb)
 
     def _print_log(self):
         if self.model_params["dual_decoder"]:
@@ -1400,7 +1480,7 @@ class Trainer:
 
         if self.rank == 0 and self.trainer_params["diversity_loss"]:
             print(f'Diversity Loss: {self.metric_logger.construct_metrics["diversity_loss"].avg:.4f}, Constructive RL loss: {self.metric_logger.construct_metrics["construct_RL_loss"].avg:.4f}')
-    def _log_in_tb_logger(self, epoch):
+    def _log_in_tb_logger(self, epoch): # train
 
         self.tb_logger.log_value('construction/train_score', self.metric_logger.construct_metrics["score"].avg, epoch)
         self.tb_logger.log_value('construction/train_loss', self.metric_logger.construct_metrics["loss"].avg, epoch)
@@ -1483,7 +1563,7 @@ class Trainer:
             #     self.tb_logger.log_value('construction/train_loss_dist', self.metric_logger.improve_metrics["loss1"].avg, epoch)
             #     self.tb_logger.log_value('construction/train_loss_timeout', self.metric_logger.improve_metrics["loss2"].avg, epoch)
 
-    def _log_in_wandb(self, epoch):
+    def _log_in_wandb(self, epoch): # train
         log_data = {
             'construction/train_score': self.metric_logger.construct_metrics["score"].avg,
             'construction/train_loss': self.metric_logger.construct_metrics["loss"].avg,
@@ -1606,6 +1686,12 @@ class Trainer:
             sol_infeasible_rate_list = self.val_metric_logger.construct_metrics["sol_infeasible_rate_list"]
             ins_infeasible_rate_list = self.val_metric_logger.construct_metrics["ins_infeasible_rate_list"]
 
+        if self.tester_params["aux_mask"]:
+            rc_score = self.val_metric_logger.reconstruct_metrics["aug_score_list"]
+            rc_gap = self.val_metric_logger.reconstruct_metrics["aug_gap_list"]
+            rc_sol_infeasible_rate_list = self.val_metric_logger.reconstruct_metrics["sol_infeasible_rate_list"]
+            rc_ins_infeasible_rate_list = self.val_metric_logger.reconstruct_metrics["ins_infeasible_rate_list"]
+
         if self.trainer_params["validation_improve_steps"] > 0.:
             improve_score = self.val_metric_logger.improve_metrics["aug_score_list"]
             improve_gap = self.val_metric_logger.improve_metrics["aug_gap_list"]
@@ -1618,6 +1704,11 @@ class Trainer:
             gap = gather_tensor_and_concat(torch.tensor([gap]).cuda())
             sol_infeasible_rate_list = gather_tensor_and_concat(torch.tensor([sol_infeasible_rate_list]).cuda())
             ins_infeasible_rate_list = gather_tensor_and_concat(torch.tensor([ins_infeasible_rate_list]).cuda())
+            if self.tester_params["aux_mask"]:
+                rc_score = gather_tensor_and_concat(torch.tensor([rc_score]).cuda())
+                rc_gap = gather_tensor_and_concat(torch.tensor([rc_gap]).cuda())
+                rc_sol_infeasible_rate_list = gather_tensor_and_concat(torch.tensor([rc_sol_infeasible_rate_list]).cuda())
+                rc_ins_infeasible_rate_list = gather_tensor_and_concat(torch.tensor([rc_ins_infeasible_rate_list]).cuda())
             if self.trainer_params["validation_improve_steps"] > 0.:
                 improve_score = gather_tensor_and_concat(torch.tensor([improve_score]).cuda())
                 improve_gap = gather_tensor_and_concat(torch.tensor([improve_gap]).cuda())
@@ -1628,6 +1719,11 @@ class Trainer:
             gap = gap.mean()
             ins_infeasible_rate_list = ins_infeasible_rate_list.mean()
             sol_infeasible_rate_list = sol_infeasible_rate_list.mean()
+            if self.tester_params["aux_mask"]:
+                rc_score = rc_score.mean()
+                rc_gap = rc_gap.mean()
+                rc_ins_infeasible_rate_list = rc_ins_infeasible_rate_list.mean()
+                rc_sol_infeasible_rate_list = rc_sol_infeasible_rate_list.mean()
             if self.trainer_params["validation_improve_steps"] > 0.:
                 improve_score = improve_score.mean()
                 improve_gap = improve_gap.mean()
@@ -1639,6 +1735,10 @@ class Trainer:
                 self.result_log["val_score"].append(score)
                 self.result_log["val_gap"].append(gap)
                 self.result_log["val_infsb_rate"].append([sol_infeasible_rate_list, ins_infeasible_rate_list])
+            if self.tester_params["aux_mask"]:
+                self.result_log["rc_val_score"].append(rc_score)
+                self.result_log["rc_val_gap"].append(rc_gap)
+                self.result_log["rc_val_infsb_rate"].append([rc_sol_infeasible_rate_list, rc_ins_infeasible_rate_list])
             if self.trainer_params["validation_improve_steps"] > 0.:
                 self.result_log["val_score_improve"].append(improve_score)
                 self.result_log["val_gap_improve"].append(improve_gap)
@@ -1651,6 +1751,11 @@ class Trainer:
                             "val/val_gap": gap,
                             'val/val_sol_infsb_rate': sol_infeasible_rate_list,
                             'val/val_ins_infsb_rate': ins_infeasible_rate_list}
+            if self.tester_params["aux_mask"]:
+                logdata.update({"val/val_score_rc": rc_score,
+                                "val/val_gap_rc": rc_gap,
+                                'val/val_sol_infsb_rate_rc': rc_sol_infeasible_rate_list,
+                                'val/val_ins_infsb_rate_rc': rc_ins_infeasible_rate_list})
             if self.trainer_params["validation_improve_steps"] > 0.:
                 logdata.update({"val/improve_val_score": improve_score,
                                 "val/improve_val_gap": improve_gap,
@@ -1662,6 +1767,9 @@ class Trainer:
             if not self.trainer_params["improvement_only"]:
                 self.tb_logger.log_value('val/val_score', score, epoch)
                 self.tb_logger.log_value('val/val_gap', gap, epoch)
+            if self.tester_params["aux_mask"]:
+                self.tb_logger.log_value('val/val_score_rc', rc_score, epoch)
+                self.tb_logger.log_value('val/val_gap_rc', rc_gap, epoch)
             if self.trainer_params["validation_improve_steps"] > 0.:
                 self.tb_logger.log_value('val/improve_val_score', improve_score, epoch)
                 self.tb_logger.log_value('val/improve_val_gap', improve_gap, epoch)
@@ -1669,6 +1777,9 @@ class Trainer:
                 if not self.trainer_params["improvement_only"]:
                     self.tb_logger.log_value('val/val_sol_infsb_rate', sol_infeasible_rate_list, epoch)
                     self.tb_logger.log_value('val/val_ins_infsb_rate', ins_infeasible_rate_list, epoch)
+                if self.tester_params["aux_mask"]:
+                    self.tb_logger.log_value('val/val_sol_infsb_rate_rc', rc_sol_infeasible_rate_list, epoch)
+                    self.tb_logger.log_value('val/val_ins_infsb_rate_rc', rc_ins_infeasible_rate_list, epoch)
                 if self.trainer_params["validation_improve_steps"] > 0.:
                     self.tb_logger.log_value('val/improve_val_sol_infsb_rate', improve_sol_infeasible_rate_list, epoch)
                     self.tb_logger.log_value('val/improve_val_ins_infsb_rate', improve_ins_infeasible_rate_list, epoch)
