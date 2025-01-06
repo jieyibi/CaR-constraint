@@ -134,6 +134,30 @@ class SINGLEModel(nn.Module):
 
         return self.encoded_nodes, features
 
+    def pre_forward_rc(self, env, rec, context):
+        batch_size, solution_size = rec.size()
+        # supplementary node features based on current solution
+        if self.problem in ['CVRP', "TSPTW", "VRPBLTW"]:
+            visited_time, depot_feature, node_feature = env.get_dynamic_feature(context, self.model_params["with_infsb_feature"], tw_normalize=self.model_params["tw_normalize"])
+        else:
+            raise NotImplementedError()
+        # positional features based on current solution
+        self.pattern = self.cyclic_position_encoding_pattern(solution_size, self.model_params['embedding_dim'])
+        h_pos = self.position_encoding(self.pattern, self.model_params['embedding_dim'], visited_time)
+        aux_scores = self.pos_encoder(h_pos)
+        # shape:(batch_size, problem_size+dummy_size, embedding_dim)
+        # get node embedding
+        if self.model_params['unified_encoder'] or self.model_params['improvement_only']:
+            h_em_final = self.encoder(depot_feature, node_feature, route_attn=aux_scores)  # already includes the supplementary features
+        else:
+            h_em_final = self.kopt_encoder(depot_feature, node_feature, route_attn=aux_scores)
+        # shape:(batch_size, problem_size+dummy_size, embedding_dim)
+        # average the depot embedding
+        dummy_size = h_em_final.size(1) - env.problem_size
+        self.encoded_nodes = torch.cat([h_em_final[:, :dummy_size, :].mean(dim=1, keepdims=True), h_em_final[:, dummy_size:, :]], dim=1)
+
+        self.decoder.set_kv(self.encoded_nodes)
+
     def set_eval_type(self, eval_type):
         self.eval_type = eval_type
 
@@ -731,7 +755,7 @@ class SINGLE_Decoder(nn.Module):
                     self.init_hidden_W = nn.Linear(self.embedding_dim, self.embedding_dim)
                     self.rnn = nn.GRUCell(self.embedding_dim, self.embedding_dim)
 
-    def set_kv(self, encoded_nodes, z):
+    def set_kv(self, encoded_nodes, z=None):
         # encoded_nodes.shape: (batch, problem+1, embedding)
         head_num = self.model_params['head_num']
 

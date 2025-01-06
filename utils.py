@@ -597,6 +597,19 @@ class metric_logger:
             "out": AverageMeter(),
             "out_nodes": AverageMeter(),
         }
+        self.reconstruct_metrics = {
+            "score": AverageMeter(),
+            "loss": AverageMeter(),
+            "improvement_value": AverageMeter(),
+            "construct_RL_loss": AverageMeter(),
+            "diversity_loss": AverageMeter(),
+            "sol_infeasible_rate": AverageMeter(),
+            "ins_infeasible_rate": AverageMeter(),
+            "feasible_dist_mean": AverageMeter(),
+            "feasible_dist_max_pomo_mean": AverageMeter(),
+            "out": AverageMeter(),
+            "out_nodes": AverageMeter(),
+        }
         if problem in ["OVRPBLTW", "OVRPLTW", "VRPBLTW"]:
             self.improve_metrics["dlout"] = AverageMeter()
             self.improve_metrics["dlout_nodes"] = AverageMeter()
@@ -623,6 +636,11 @@ class metric_logger:
             self.construct_metrics["dlout_nodes"] = AverageMeter()
             self.construct_metrics["capacity_out"] = AverageMeter()
             self.construct_metrics["capacity_out_nodes"] = AverageMeter()
+
+            self.reconstruct_metrics["dlout"] = AverageMeter()
+            self.reconstruct_metrics["dlout_nodes"] = AverageMeter()
+            self.reconstruct_metrics["capacity_out"] = AverageMeter()
+            self.reconstruct_metrics["capacity_out_nodes"] = AverageMeter()
         if dual_decoder:
             self.construct_metrics["loss1"] = AverageMeter()
             self.construct_metrics["loss2"] = AverageMeter()
@@ -668,6 +686,16 @@ class val_metric_logger:
             "no_aug_gap_list": 0.0,
             "aug_gap_list": 0.0,
         }
+        self.reconstruct_masked_metrics = {
+            "no_aug_score": torch.zeros(0).to(trainer.device),
+            "aug_score": torch.zeros(0).to(trainer.device),
+            "sol_infeasible_rate": AverageMeter(),
+            "ins_infeasible_rate": AverageMeter(),
+            "no_aug_feasible": torch.zeros(0).to(trainer.device),
+            "aug_feasible": torch.zeros(0).to(trainer.device),
+            "no_aug_gap_list": 0.0,
+            "aug_gap_list": 0.0,
+        }
         if trainer.problem in ["OVRPBLTW", "OVRPLTW", "VRPBLTW"]:
             self.improve_metrics["no_aug_total_out_of_dl"] = torch.zeros(0).to(trainer.device)
             self.improve_metrics["no_aug_out_of_dl_nodes"] = torch.zeros(0).to(trainer.device)
@@ -694,6 +722,9 @@ class val_metric_logger:
 
     def _reconstruct_tensor_update(self, key, value):
         self.reconstruct_metrics[key] = torch.cat((self.reconstruct_metrics[key], value), dim=0)
+
+    def _reconstruct_masked_tensor_update(self, key, value):
+        self.reconstruct_masked_metrics[key] = torch.cat((self.reconstruct_masked_metrics[key], value), dim=0)
 
     def _log_output(self, trainer):
         # construction
@@ -730,24 +761,39 @@ class val_metric_logger:
             ins_infeasible_rate = self.improve_metrics["ins_infeasible_rate"]
             self.improve_metrics["sol_infeasible_rate_list"] = round(sol_infeasible_rate.avg.item() *100, 3)
             self.improve_metrics["ins_infeasible_rate_list"] = round(ins_infeasible_rate.avg.item() *100, 3)
+            if trainer.trainer_params["reconstruct"]:
+                no_aug_score = self.reconstruct_metrics["no_aug_score"]
+                no_aug_feasible = self.reconstruct_metrics["no_aug_feasible"]
+                aug_score = self.reconstruct_metrics["aug_score"]
+                aug_feasible = self.reconstruct_metrics["aug_feasible"]
+                if trainer.trainer_params["fsb_dist_only"]:
+                    if trainer.rank == 0: print(">> Only feasible solutions are under consideration!")
+                    self.reconstruct_metrics["no_aug_score_list"] = round(no_aug_score[no_aug_feasible.bool()].mean().item(), 4)
+                    self.reconstruct_metrics["aug_score_list"] = round(aug_score[aug_feasible.bool()].mean().item(), 4)
+                else:
+                    self.reconstruct_metrics["no_aug_score_list"] = round(no_aug_score.mean().item(), 4)
+                    self.reconstruct_metrics["aug_score_list"] = round(aug_score.mean().item(), 4)
+                sol_infeasible_rate = self.reconstruct_metrics["sol_infeasible_rate"]
+                ins_infeasible_rate = self.reconstruct_metrics["ins_infeasible_rate"]
+                self.reconstruct_metrics["sol_infeasible_rate_list"] = round(sol_infeasible_rate.avg.item() * 100, 3)
+                self.reconstruct_metrics["ins_infeasible_rate_list"] = round(ins_infeasible_rate.avg.item() * 100, 3)
         # reconstruction
         if trainer.tester_params["aux_mask"]:
-            no_aug_score = self.reconstruct_metrics["no_aug_score"]
-            no_aug_feasible = self.reconstruct_metrics["no_aug_feasible"]
-            aug_score = self.reconstruct_metrics["aug_score"]
-            aug_feasible = self.reconstruct_metrics["aug_feasible"]
+            no_aug_score = self.reconstruct_masked_metrics["no_aug_score"]
+            no_aug_feasible = self.reconstruct_masked_metrics["no_aug_feasible"]
+            aug_score = self.reconstruct_masked_metrics["aug_score"]
+            aug_feasible = self.reconstruct_masked_metrics["aug_feasible"]
             if trainer.trainer_params["fsb_dist_only"]:
                 if trainer.rank == 0: print(">> Only feasible solutions are under consideration!")
-                self.reconstruct_metrics["no_aug_score_list"] = round(no_aug_score[no_aug_feasible.bool()].mean().item(), 4)
-                self.reconstruct_metrics["aug_score_list"] = round(aug_score[aug_feasible.bool()].mean().item(), 4)
+                self.reconstruct_masked_metrics["no_aug_score_list"] = round(no_aug_score[no_aug_feasible.bool()].mean().item(), 4)
+                self.reconstruct_masked_metrics["aug_score_list"] = round(aug_score[aug_feasible.bool()].mean().item(), 4)
             else:
-                self.reconstruct_metrics["no_aug_score_list"] = round(no_aug_score.mean().item(), 4)
-                self.reconstruct_metrics["aug_score_list"] = round(aug_score.mean().item(), 4)
-
-            sol_infeasible_rate = self.reconstruct_metrics["sol_infeasible_rate"]
-            ins_infeasible_rate = self.reconstruct_metrics["ins_infeasible_rate"]
-            self.reconstruct_metrics["sol_infeasible_rate_list"] = round(sol_infeasible_rate.avg.item() *100, 3)
-            self.reconstruct_metrics["ins_infeasible_rate_list"] = round(ins_infeasible_rate.avg.item() *100, 3)
+                self.reconstruct_masked_metrics["no_aug_score_list"] = round(no_aug_score.mean().item(), 4)
+                self.reconstruct_masked_metrics["aug_score_list"] = round(aug_score.mean().item(), 4)
+            sol_infeasible_rate = self.reconstruct_masked_metrics["sol_infeasible_rate"]
+            ins_infeasible_rate = self.reconstruct_masked_metrics["ins_infeasible_rate"]
+            self.reconstruct_masked_metrics["sol_infeasible_rate_list"] = round(sol_infeasible_rate.avg.item() *100, 3)
+            self.reconstruct_masked_metrics["ins_infeasible_rate_list"] = round(ins_infeasible_rate.avg.item() *100, 3)
 
     def _calculate_gap(self, trainer, opt_sol):
         # construction
@@ -778,22 +824,33 @@ class val_metric_logger:
 
             self.improve_metrics["no_aug_gap_list"] = round(gap.mean().item(), 4)
             self.improve_metrics["aug_gap_list"] = round(aug_gap.mean().item(), 4)
+            if trainer.trainer_params["reconstruct"]:
+                no_aug_score = self.reconstruct_metrics["no_aug_score"]
+                no_aug_feasible = self.reconstruct_metrics["no_aug_feasible"]
+                aug_score = self.reconstruct_metrics["aug_score"]
+                aug_feasible = self.reconstruct_metrics["aug_feasible"]
+                if trainer.trainer_params["fsb_dist_only"]:
+                    gap = (no_aug_score[no_aug_feasible.bool()] - opt_sol[no_aug_feasible.bool()]) / opt_sol[no_aug_feasible.bool()] * 100
+                    aug_gap = (aug_score[aug_feasible.bool()] - opt_sol[aug_feasible.bool()]) / opt_sol[aug_feasible.bool()] * 100
+                else:
+                    gap = (no_aug_score - opt_sol) / opt_sol * 100
+                    aug_gap = (aug_score - opt_sol) / opt_sol * 100
+                self.reconstruct_metrics["no_aug_gap_list"] = round(gap.mean().item(), 4)
+                self.reconstruct_metrics["aug_gap_list"] = round(aug_gap.mean().item(), 4)
         # reconstruction
         if trainer.tester_params["aux_mask"]:
-            no_aug_score = self.reconstruct_metrics["no_aug_score"]
-            no_aug_feasible = self.reconstruct_metrics["no_aug_feasible"]
-            aug_score = self.reconstruct_metrics["aug_score"]
-            aug_feasible = self.reconstruct_metrics["aug_feasible"]
+            no_aug_score = self.reconstruct_masked_metrics["no_aug_score"]
+            no_aug_feasible = self.reconstruct_masked_metrics["no_aug_feasible"]
+            aug_score = self.reconstruct_masked_metrics["aug_score"]
+            aug_feasible = self.reconstruct_masked_metrics["aug_feasible"]
             if trainer.trainer_params["fsb_dist_only"]:
-                gap = (no_aug_score[no_aug_feasible.bool()] - opt_sol[no_aug_feasible.bool()]) / opt_sol[
-                    no_aug_feasible.bool()] * 100
-                aug_gap = (aug_score[aug_feasible.bool()] - opt_sol[aug_feasible.bool()]) / opt_sol[
-                    aug_feasible.bool()] * 100
+                gap = (no_aug_score[no_aug_feasible.bool()] - opt_sol[no_aug_feasible.bool()]) / opt_sol[no_aug_feasible.bool()] * 100
+                aug_gap = (aug_score[aug_feasible.bool()] - opt_sol[aug_feasible.bool()]) / opt_sol[aug_feasible.bool()] * 100
             else:
                 gap = (no_aug_score - opt_sol) / opt_sol * 100
                 aug_gap = (aug_score - opt_sol) / opt_sol * 100
-            self.reconstruct_metrics["no_aug_gap_list"] = round(gap.mean().item(), 4)
-            self.reconstruct_metrics["aug_gap_list"] = round(aug_gap.mean().item(), 4)
+            self.reconstruct_masked_metrics["no_aug_gap_list"] = round(gap.mean().item(), 4)
+            self.reconstruct_masked_metrics["aug_gap_list"] = round(aug_gap.mean().item(), 4)
 
 
 class ValidationDataset(Dataset):
