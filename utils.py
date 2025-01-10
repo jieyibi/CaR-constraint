@@ -864,15 +864,12 @@ class ValidationDataset(Dataset):
         return self.data[idx]
 
 def kendall_tau_distance(sol):
-    # 计算每对解之间的Kendall tau距离
     B, P, solution_size = sol.shape
     sol_expanded = sol.unsqueeze(2).expand(-1, -1, P, -1)  # B x P x P x solution_size
     sol_transposed = sol.unsqueeze(1).expand(-1, P, -1, -1)  # B x P x P x solution_size
 
-    # 计算解之间的顺序变化
     pairwise_diff = (sol_expanded < sol_expanded.transpose(2, 3)) != (sol_transposed < sol_transposed.transpose(2, 3))
-
-    # 计算每对解之间的交换次数
+    # exchange times of two solutions
     kendall_tau_dist = pairwise_diff.float().sum(dim=-1).sum(dim=-1)  # B x P x P
     return kendall_tau_dist
 
@@ -900,12 +897,12 @@ def jaccard_distance(sol):
     edges = edges.view(B, P, -1, 1).expand(-1, -1, -1, P)  # B x P x (edge_count*2) x P
     transposed_edges = edges.permute(0, 3, 2, 1)  # B x P x (edge_count*2) x P
 
-    # intersection: B x P x P (表示每对解的交集大小)
+    # intersection: B x P x P
     intersection = (edges == transposed_edges).all(dim=2).sum(dim=2).float()
-    # union: B x P x P (表示每对解的并集大小)
+    # union: B x P x P
     union = edge_count - intersection + (edges != transposed_edges).any(dim=2).sum(dim=2).float()
 
-    # jaccard_dist: B x P x P (表示每对解的Jaccard距离)
+    # jaccard_dist: B x P x P
     jaccard_dist = 1 - intersection / union
     return jaccard_dist
 
@@ -1004,3 +1001,11 @@ def get_optimizer_step(optimizer):
         return max(step_list)
     else:
         return 0
+
+
+def row_wise_overlap_no_loop(tensor1, tensor2):
+    tensor1_expanded = tensor1.unsqueeze(2)
+    tensor2_expanded = tensor2.unsqueeze(1)
+    overlap_matrix = (tensor1_expanded == tensor2_expanded)
+    overlap_counts = overlap_matrix.any(dim=2).sum(dim=1)
+    return overlap_counts

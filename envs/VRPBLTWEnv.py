@@ -788,9 +788,9 @@ class VRPBLTWEnv:
 
         return visited_time, None, feature
 
-    def improvement_step(self, rec, action, obj, feasible_history, t, improvement_method = "kopt", epsilon=EPSILON_hardcoded, weights=0, out_reward = False, penalty_factor=1., penalty_normalize=False, insert_before=True, seperate_obj_penalty=False, non_linear=None):
+    def improvement_step(self, rec, action, obj, feasible_history, t, improvement_method = "kopt", epsilon=EPSILON_hardcoded, weights=0, out_reward = False, penalty_factor=1., penalty_normalize=False, insert_before=True, seperate_obj_penalty=False, non_linear=None, n2s_decoder=False):
 
-        _, total_history = feasible_history.size()
+        total_history = feasible_history.size(1)
         if seperate_obj_penalty:
             obj, penalty = obj
             pre_penalty_bsf =  penalty[:, 1:].clone()  # batch_size, 3 (current, bsf, tsp_bsf)
@@ -849,37 +849,51 @@ class VRPBLTWEnv:
             rewards += (pre_penalty_bsf - now_penalty_bsf)
 
         # feasible history step
-        feasible_history[:, 1:] = feasible_history[:, :total_history - 1].clone()
-        feasible_history[:, 0] = feasible.clone()
+        if n2s_decoder: # calculate the removal record
+            info, reg = None, torch.zeros((action.size(0), 1))
+            assert not self.env_params["with_regular"], "n2s decoder does not support regularization reward."
+            feasible_history[:, 1:] = feasible_history[:, :total_history - 1].clone()
+            action_removal= torch.zeros_like(feasible_history[:,0])
+            action_removal[torch.arange(action.size(0)).unsqueeze(1), action[:, :1]] = 1.
+            feasible_history[:, 0] = action_removal.clone()
+            context2 = torch.cat(
+            (
+                feasible_history, # last three removal
+                feasible_history.mean(1, keepdims=True) if t > (total_history-2) else feasible_history[:,:(t+1)].mean(1, keepdims=True), # note: slightly different from N2S due to shorter improvement steps; before/after?
+            ),1 )  # (batch_size, 4, solution_size)
+        else:
+            feasible_history[:, 1:] = feasible_history[:, :total_history - 1].clone()
+            feasible_history[:, 0] = feasible.clone()
 
-        # compute the ES features
-        feasible_history_pre = feasible_history[:, 1:]
-        feasible_history_post = feasible_history[:, :total_history - 1]
-        f_to_if = ((feasible_history_pre == True) & (feasible_history_post == False)).sum(1, True) / (total_history - 1)
-        f_to_f = ((feasible_history_pre == True) & (feasible_history_post == True)).sum(1, True) / (total_history - 1)
-        if_to_f = ((feasible_history_pre == False) & (feasible_history_post == True)).sum(1, True) / (total_history - 1)
-        if_to_if = ((feasible_history_pre == False) & (feasible_history_post == False)).sum(1, True) / (total_history - 1)
-        f_to_if_2 = f_to_if / (f_to_if + f_to_f + 1e-5)
-        f_to_f_2 = f_to_f / (f_to_if + f_to_f + 1e-5)
-        if_to_f_2 = if_to_f / (if_to_f + if_to_if + 1e-5)
-        if_to_if_2 = if_to_if / (if_to_f + if_to_if + 1e-5)
+            # compute the ES features
+            feasible_history_pre = feasible_history[:, 1:]
+            feasible_history_post = feasible_history[:, :total_history - 1]
+            f_to_if = ((feasible_history_pre == True) & (feasible_history_post == False)).sum(1, True) / (total_history - 1)
+            f_to_f = ((feasible_history_pre == True) & (feasible_history_post == True)).sum(1, True) / (total_history - 1)
+            if_to_f = ((feasible_history_pre == False) & (feasible_history_post == True)).sum(1, True) / (total_history - 1)
+            if_to_if = ((feasible_history_pre == False) & (feasible_history_post == False)).sum(1, True) / (total_history - 1)
+            f_to_if_2 = f_to_if / (f_to_if + f_to_f + 1e-5)
+            f_to_f_2 = f_to_f / (f_to_if + f_to_f + 1e-5)
+            if_to_f_2 = if_to_f / (if_to_f + if_to_if + 1e-5)
+            if_to_if_2 = if_to_if / (if_to_f + if_to_if + 1e-5)
 
-        # update info to decoder
-        active = (t >= (total_history - 2))
-        context2 = torch.cat((
-            (if_to_if * active),
-            (if_to_if_2 * active),
-            (f_to_f * active),
-            (f_to_f_2 * active),
-            (if_to_f * active),
-            (if_to_f_2 * active),
-            (f_to_if * active),
-            (f_to_if_2 * active),
-            feasible.unsqueeze(-1).float(),
-        ), -1)  # 9 ES features
+            # update info to decoder
+            active = (t >= (total_history - 2))
+            context2 = torch.cat((
+                (if_to_if * active),
+                (if_to_if_2 * active),
+                (f_to_f * active),
+                (f_to_f_2 * active),
+                (if_to_f * active),
+                (if_to_f_2 * active),
+                (f_to_if * active),
+                (f_to_if_2 * active),
+                feasible.unsqueeze(-1).float(),
+            ), -1)  # 9 ES features
 
-        # update regulation
-        reg = self.f(f_to_f_2) + self.f(if_to_if_2)
+            info = (if_to_if, if_to_f, f_to_if, f_to_f, if_to_if_2, if_to_f_2, f_to_if_2, f_to_f_2)
+            # update regulation
+            reg = self.f(f_to_f_2) + self.f(if_to_if_2)
 
         reward = torch.cat((rewards[:, :1],  # reward
                             -1 * reg * weights * 0.05 * self.env_params["with_regular"],  # regulation, alpha = 0.05
@@ -897,7 +911,7 @@ class VRPBLTWEnv:
                feasible_history,
                context,
                context2,
-               (if_to_if, if_to_f, f_to_if, f_to_f, if_to_if_2, if_to_f_2, f_to_if_2, f_to_f_2),
+               info,
                out_penalty,
                out_node_penalty
                )

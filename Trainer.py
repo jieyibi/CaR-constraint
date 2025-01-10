@@ -524,7 +524,7 @@ class Trainer:
             self.model.zero_grad()
             self.optimizer.zero_grad()
         ## way 1: static weights
-        coefficient = 1. if self.trainer_params["improvement_only"] else 100.
+        coefficient = 1. if self.trainer_params["improvement_only"] else 10.
         ## way 2: dynamic weights based on scale
         # if self.trainer_params["dynamic_coefficient"]:
         #     coefficient = 10 ** (torch.log10(torch.abs(construct_loss.detach()/improve_loss.detach())).floor())
@@ -776,14 +776,21 @@ class Trainer:
         solution = env.selected_node_list.clone() # shape: (batch, pomo, solution)
         if not self.trainer_params["improvement_only"]: # if yes, already generate k solutions for each instance
             # select top k
-            solution, select_idx = select4improve(solution, cons_reward, strategy=self.trainer_params["select_strategy"],
-                                                  K=self.trainer_params["select_top_k"], rnd_prob=self.trainer_params["stochastic_probability"],
-                                                  diversity=self.trainer_params["diversity"])
-            # solution shape: (batch, k, solution); solution_idx shape: (batch, k)
-            feasibility_history = torch.gather(~env.infeasible, 1, select_idx)
-            if self.trainer_params["neighborhood_search"]:
-                cons_log_prob = cons_log_prob[torch.arange(env.batch_size)[:,None], select_idx]
-                _, unconfident_indices = torch.topk(cons_log_prob, k=self.trainer_params["k_unconfident"], dim=-1, largest=False)
+            if self.trainer_params["select_top_k"] < self.env_params["pomo_size"]:
+                solution, select_idx = select4improve(solution, cons_reward, strategy=self.trainer_params["select_strategy"],
+                                                      K=self.trainer_params["select_top_k"], rnd_prob=self.trainer_params["stochastic_probability"],
+                                                      diversity=self.trainer_params["diversity"])
+                # solution shape: (batch, k, solution); solution_idx shape: (batch, k)
+                feasibility_history = torch.gather(~env.infeasible, 1, select_idx)
+                if self.trainer_params["neighborhood_search"]:
+                    cons_log_prob = cons_log_prob[torch.arange(env.batch_size)[:, None], select_idx]
+                    _, unconfident_indices = torch.topk(cons_log_prob, k=self.trainer_params["k_unconfident"], dim=-1, largest=False)
+            else:
+                select_idx = torch.arange(env.pomo_size)[None, :].repeat(env.batch_size, 1)
+                feasibility_history = ~env.infeasible
+                _, topk2 = select4improve(solution, cons_reward, strategy=self.trainer_params["select_strategy"],
+                                          K=5, rnd_prob=self.trainer_params["stochastic_probability"],
+                                          diversity=self.trainer_params["diversity"])
         else:
             select_idx = torch.arange(env.pomo_size)[None, :].repeat(env.batch_size, 1)
             feasibility_history = ~env.infeasible
@@ -803,10 +810,14 @@ class Trainer:
         else:
             obj = torch.cat((obj[:, None], obj[:, None], obj[:, None]), -1).clone()
             best_reward, best_index = (obj[:, 0].view(batch_size, k)).min(-1)
-        context2 = torch.zeros(batch_size * k, 9)
-        context2[:, -1] = feasibility_history.view(-1) # current feasibility
         total_history = self.trainer_params["total_history"]
-        feasibility_history = feasibility_history.view(-1, 1).expand(batch_size * k, total_history)
+        if self.model_params["n2s_decoder"]:
+            context2 = torch.zeros(batch_size * k, 4, solution_size)
+            feasibility_history = torch.zeros(batch_size * k, total_history, solution_size)
+        else:
+            context2 = torch.zeros(batch_size * k, 9)
+            context2[:, -1] = feasibility_history.view(-1) # current feasibility
+            feasibility_history = feasibility_history.view(-1, 1).expand(batch_size * k, total_history)
         action = None
         rec_best = rec.view(batch_size, k, -1)[torch.arange(batch_size),best_index,:].clone()
         # print(f"!!!!!!!constructed best: {remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size)[:3]}")
@@ -840,7 +851,8 @@ class Trainer:
                                                                                              improvement_method = improvement_method, epsilon = self.trainer_params["epsilon"],
                                                                                              seperate_obj_penalty=self.trainer_params["seperate_obj_penalty"],
                                                                                              weights=weights, out_reward = self.trainer_params["out_reward"],
-                                                                                             penalty_factor=self.lambda_, penalty_normalize=self.trainer_params["penalty_normalize"], insert_before=self.trainer_params["insert_before"], non_linear=self.trainer_params["non_linear"])
+                                                                                             penalty_factor=self.lambda_, penalty_normalize=self.trainer_params["penalty_normalize"],
+                                                                                            insert_before=self.trainer_params["insert_before"], non_linear=self.trainer_params["non_linear"], n2s_decoder=self.model_params["n2s_decoder"])
 
             if self.trainer_params["bonus_for_construction"] or self.trainer_params["extra_bonus"] or self.trainer_params["imitation_learning"] or self.trainer_params["reconstruct"]:
                 # update best solution
@@ -1016,6 +1028,11 @@ class Trainer:
             self.metric_logger.improve_metrics["epsilon_feasible_dist_mean"].update(epision_feasible_dist_mean, soft_feasible_all.any(0).sum())
             self.metric_logger.improve_metrics["epsilon_feasible_dist_max_pomo_mean"].update(epision_feasible_max_pomo_dist, soft_batch_feasible.sum())
 
+        # just to test
+        # topk = torch.stack(memory.obj)[:, :, 1].min(0)[0].view(batch_size, 40).topk(k=5, dim=-1, largest=False).indices
+        # overlap = row_wise_overlap_no_loop(topk, topk2)
+        # print(overlap, overlap.float().mean().item())
+
         # end update
         memory.clear_memory()
         # print(f"!!!!!!!improved best: {remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size)[:3]}")
@@ -1035,10 +1052,14 @@ class Trainer:
             obj, context, out_penalty, out_node_penalty = env.get_costs(rec, get_context=True) # obj only
             obj = torch.cat((obj[:, None], obj[:, None], obj[:, None]), -1).clone()
             # obj = obj.unsqueeze(-1).expand(-1, -1, 3)
-            context2 = torch.zeros(batch_size * pomo_size, 9)
-            context2[:, -1] = (~env.infeasible).view(-1) # current feasibility
             total_history = self.trainer_params["total_history"]
-            feasibility_history = (~env.infeasible).view(-1, 1).expand(batch_size * pomo_size, total_history)
+            if self.model_params["n2s_decoder"]:
+                context2 = torch.zeros(batch_size * pomo_size, 4, solution_size)
+                feasibility_history = torch.zeros(batch_size * pomo_size, total_history, solution_size)
+            else:
+                context2 = torch.zeros(batch_size * pomo_size, 9)
+                context2[:, -1] = (~env.infeasible).view(-1) # current feasibility
+                feasibility_history = (~env.infeasible).view(-1, 1).expand(batch_size * pomo_size, total_history)
             action = None
             best_reward, best_index = (obj[:, 0].view(batch_size//aug_factor, aug_factor*pomo_size)).min(-1)
             rec_best = rec.view(batch_size//aug_factor, aug_factor*pomo_size, -1)[torch.arange(batch_size//aug_factor), best_index, :].clone()
@@ -1085,7 +1106,7 @@ class Trainer:
                 # state transient
                 # rec, rewards, obj, feasibility_history, context, context2, info
                 rec, _, obj, feasibility_history, context, context2, _, out_penalty, out_node_penalty = env.improvement_step(rec, action, obj, feasibility_history, t,
-                                                                                                                       improvement_method = improvement_method, insert_before=self.trainer_params["insert_before"])
+                                                                                                                       improvement_method = improvement_method, insert_before=self.trainer_params["insert_before"], n2s_decoder=self.model_params["n2s_decoder"])
                 # update best solution
                 criterion = obj.clone()
                 new_best, best_index = criterion[:, 0].view(batch_size//aug_factor, aug_factor*pomo_size).min(-1)
