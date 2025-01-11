@@ -105,7 +105,8 @@ def args2dict(args):
                       "val_init_sol_strategy": args.val_init_sol_strategy,
                       "neighborhood_search": args.neighborhood_search, "k_unconfident": args.k_unconfident,
                       "improvement_method": args.improvement_method, "rm_num": args.rm_num, "insert_before": args.insert_before,
-                      "improve_steps": args.improve_steps, "dummy_improve_steps": args.dummy_improve_steps, "total_history": args.total_history,
+                      "improve_steps": args.improve_steps, "dummy_improve_steps": args.dummy_improve_steps,
+                      "total_history": args.total_history, "dummy_improve_selected": args.dummy_improve_selected,
                       "stochastic_probability": args.stochastic_probability, "select_strategy": args.select_strategy,
                       "select_top_k": args.select_top_k, "diversity": args.diversity,
                       "validation_improve_steps": args.validation_improve_steps,
@@ -272,10 +273,11 @@ if __name__ == "__main__":
     parser.add_argument('--POMO_checkpoint', type=str, default="results/20240831_221004_TSPTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_construction_only/epoch-5000.pt")
     parser.add_argument('--max_dummy_size', type=int, default=18)
     parser.add_argument('--improve_start_when_dummy_ok', type=bool, default=True)
-    parser.add_argument('--improve_steps', type=int, default=5)
+    parser.add_argument('--improve_steps', type=int, default=4)
     parser.add_argument('--dummy_improve_steps', type=int, default=10)
+    parser.add_argument('--dummy_improve_selected', type=str, default="random", choices=["random", "topk"])
     parser.add_argument('--validation_improve_steps', type=int, default=20)
-    parser.add_argument('--select_strategy', type=str, default="stochastic", choices=["quality", "diversity", "quality_stochastic", "diversity_stochastic", "stochastic"])
+    parser.add_argument('--select_strategy', type=str, default="quality", choices=["quality", "diversity", "quality_stochastic", "diversity_stochastic", "stochastic"])
     parser.add_argument('--select_top_k', type=int, default=5)
     # parser.add_argument('--validation_select_top_k', type=int, default=20)
     parser.add_argument('--stochastic_probability', type=float, default=0.5)
@@ -298,7 +300,7 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=2023)
     parser.add_argument('--log_dir', type=str, default="./results")
     parser.add_argument('--no_cuda', action='store_true')
-    parser.add_argument('--gpu_id', type=str, default="3")
+    parser.add_argument('--gpu_id', type=str, default="0")
     parser.add_argument('--world_size', type=int, default=1)
     parser.add_argument("--multiple_gpu", type=bool, default=False)
     parser.add_argument('--occ_gpu', type=float, default=0., help="occupy (X)% GPU memory in advance, please use sparingly.")
@@ -357,7 +359,7 @@ if __name__ == "__main__":
     # note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay5_0001_cons10l+p"
     # note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay5_0001_RC"
     # note = "_VRPBLTW100_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay10_0001"  #
-    note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprSample5_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1InsAfterN2S_diversity_IL_NonLinear_decay5_0001_co10_RCbonus"
+    note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprTop5Qual_Impro4Rndfrom10Val20_AMP_warmstart_noregnobonus_Rmx1InsAfterN2S_diversity_IL_NonLinear_decay5_0001_co10_RCbonus"
     # note = "debug"
     # note = "test "
     if "debug" in note:

@@ -842,73 +842,151 @@ class Trainer:
         self.metric_logger.improve_metrics["cons_out_ratio"].update((out_penalty>0).float().mean().item(), batch_size)
 
         # sample trajectory
-        t = 0
         T = self.trainer_params["improve_steps"]
+        T_pi = self.trainer_params["dummy_improve_steps"]
+        '''
+        logics for use the top T steps (improved reward) among T_pi steps to update the improvement model:
+        1. with torch.no_grad(): conduct T_pi-steps improvements, record [the metrics w/o gradient] and the model input (rec, context, context2, action)
+        Note: only record top T improved reward
+        To achieve this: maintain a list of the index of top T steps and select them afterwards (remember to extend that to the batch_rewards)
+        2. rerun the improvement step with top T model inputs, and get log p with gradient 
+        '''
         use_LoRA = False
         memory = Memory()
-        while t < T:
-            # print(">>>>>>>>>> ", t)
-            entropy = []
+        t = 0
+        if T_pi > 0:
+            # step 1: rollout
+            rec_list, context_list, context2_list, action_list, entropy = [], [], [], [], []
+            with torch.no_grad():
+                while t < T_pi:
+                    state = (env, rec, context, context2, action)
+                    rec_list.append(rec)
+                    context_list.append(context)
+                    context2_list.append(context2)
+                    action_list.append(action)
+                    if self.model_params["use_LoRA"] and t >= self.trainer_params["LoRA_begin_step"]: use_LoRA = True
+                    with torch.amp.autocast(device_type="cuda", enabled=amp_training):
+                        action, _, entro_p, improvement_method = self.model(state, solver="improvement", require_entropy=True, use_LoRA=use_LoRA)
+                    entropy.append(entro_p)
+                    # state transient
+                    rec, rewards, obj, feasibility_history, context, context2, info, out_penalty, out_node_penalty = env.improvement_step(
+                        rec, action, obj, feasibility_history, t,
+                        improvement_method=improvement_method, epsilon=self.trainer_params["epsilon"],
+                        seperate_obj_penalty=self.trainer_params["seperate_obj_penalty"],
+                        weights=weights, out_reward=self.trainer_params["out_reward"],
+                        penalty_factor=self.lambda_, penalty_normalize=self.trainer_params["penalty_normalize"],
+                        insert_before=self.trainer_params["insert_before"],
+                        non_linear=self.trainer_params["non_linear"], n2s_decoder=self.model_params["n2s_decoder"])
+                    if self.trainer_params["bonus_for_construction"] or self.trainer_params["extra_bonus"] or self.trainer_params["imitation_learning"] or self.trainer_params["reconstruct"]:
+                        # update best solution
+                        criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (
+                                    obj[0] + obj[1]).clone()
+                        new_best, best_index = criterion[:, 0].view(batch_size, k).min(-1)
+                        index = new_best < best_reward
+                        best_reward[index] = new_best[index]  # update best reward
+                        is_improved = (is_improved | index)
+                        rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size), best_index, :][index].clone()  # update best solution
+                    memory.rewards.append(rewards)
+                    criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (obj[0] + obj[1]).clone()
+                    memory.obj.append(criterion.clone())
+                    memory.out_node_penalty.append(out_node_penalty)  # (c, b*k)
+                    memory.out_penalty.append(out_penalty)  # (c, b*k)
+                    feasible = out_penalty.sum(0) <= 0.0
+                    soft_infeasible = (out_penalty.sum(0) <= epsilon) & (out_penalty.sum(0) > 0.)
+                    memory.feasible.append(feasible)
+                    memory.soft_feasible.append(soft_infeasible)
+                    # next
+                    t = t + 1
+            # step 2: select the top T reward
+            rollout_reward = torch.stack(memory.rewards)
+            if self.trainer_params["dummy_improve_selected"] == "topk":
+                reward, index_list = rollout_reward.sum(-1).topk(k=T, largest=True, dim=0) # shape: (T, batch)
+            elif self.trainer_params["dummy_improve_selected"] == "random":
+                index_list = torch.stack([torch.randperm(rollout_reward.size(0))[:T] for _ in range(rollout_reward.size(1))], dim=1)
+                reward = rollout_reward.sum(-1)[index_list, torch.arange(rollout_reward.size(1))]  # shape: (T, batch)
+            else:
+                raise ValueError("Unknown dummy_improve_selected method: {}".format(self.trainer_params["dummy_improve_selected"]))
+            if self.model.training: batch_reward.extend(list(torch.gather(rollout_reward[:, :, 0], 0, index_list).clone()))
+            selected_rec = select_data_by_index(torch.stack(rec_list), index_list)
+            selected_context2 = select_data_by_index(torch.stack(context2_list), index_list)
+            action_list[0] = -torch.ones_like(action_list[-1])
+            selected_action = select_data_by_index(torch.stack(action_list), index_list)
+            context_list1 = tuple(torch.stack([data_tuple[i] for data_tuple in context_list], dim=0) for i in range(len(context_list[0])))
+            selected_context = [select_data_by_index(data, index_list) for data in context_list1]
+            selected_context = [tuple(tensors) for tensors in zip(*selected_context)]
+            # step 3: rerun with gradient
+            t = 0
+            while t < T:
+                state = (env, selected_rec[t], selected_context[t], selected_context2[t], selected_action[t])
+                if self.model_params["use_LoRA"] and t >= self.trainer_params["LoRA_begin_step"]: use_LoRA=True
+                with torch.amp.autocast(device_type="cuda", enabled=amp_training):
+                    _, log_lh, _ = self.model(state, solver="improvement", require_entropy=False, use_LoRA=use_LoRA)
+                if self.model.training: memory.logprobs.append(log_lh.clone())
+                t += 1
+        else:
+            while t < T:
+                # print(">>>>>>>>>> ", t)
+                entropy = []
 
-            state = (env, rec, context, context2, action)
-            if self.model_params["use_LoRA"] and t >= self.trainer_params["LoRA_begin_step"]: use_LoRA=True
-            with torch.amp.autocast(device_type="cuda", enabled=amp_training):
-                action, log_lh, entro_p, improvement_method = self.model(state, solver="improvement", require_entropy=True, use_LoRA=use_LoRA)
+                state = (env, rec, context, context2, action)
+                if self.model_params["use_LoRA"] and t >= self.trainer_params["LoRA_begin_step"]: use_LoRA=True
+                with torch.amp.autocast(device_type="cuda", enabled=amp_training):
+                    action, log_lh, entro_p, improvement_method = self.model(state, solver="improvement", require_entropy=True, use_LoRA=use_LoRA)
 
-            if self.model.training: memory.logprobs.append(log_lh.clone())
-            entropy.append(entro_p)
+                if self.model.training: memory.logprobs.append(log_lh.clone())
+                entropy.append(entro_p)
 
-            # state transient
-            rec, rewards, obj, feasibility_history, context, context2, info, out_penalty, out_node_penalty = env.improvement_step(rec, action, obj, feasibility_history, t,
-                                                                                             improvement_method = improvement_method, epsilon = self.trainer_params["epsilon"],
-                                                                                             seperate_obj_penalty=self.trainer_params["seperate_obj_penalty"],
-                                                                                             weights=weights, out_reward = self.trainer_params["out_reward"],
-                                                                                             penalty_factor=self.lambda_, penalty_normalize=self.trainer_params["penalty_normalize"],
-                                                                                            insert_before=self.trainer_params["insert_before"], non_linear=self.trainer_params["non_linear"], n2s_decoder=self.model_params["n2s_decoder"])
+                # state transient
+                rec, rewards, obj, feasibility_history, context, context2, info, out_penalty, out_node_penalty = env.improvement_step(rec, action, obj, feasibility_history, t,
+                                                                                                 improvement_method = improvement_method, epsilon = self.trainer_params["epsilon"],
+                                                                                                 seperate_obj_penalty=self.trainer_params["seperate_obj_penalty"],
+                                                                                                 weights=weights, out_reward = self.trainer_params["out_reward"],
+                                                                                                 penalty_factor=self.lambda_, penalty_normalize=self.trainer_params["penalty_normalize"],
+                                                                                                insert_before=self.trainer_params["insert_before"], non_linear=self.trainer_params["non_linear"], n2s_decoder=self.model_params["n2s_decoder"])
 
-            if self.trainer_params["bonus_for_construction"] or self.trainer_params["extra_bonus"] or self.trainer_params["imitation_learning"] or self.trainer_params["reconstruct"]:
-                # update best solution
-                criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (obj[0]+obj[1]).clone()
-                new_best, best_index = criterion[:, 0].view(batch_size, k).min(-1)
-                index = new_best < best_reward
-                best_reward[index] = new_best[index] # update best reward
-                is_improved = (is_improved | index)
-                rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size), best_index, :][index].clone() # update best solution
+                if self.trainer_params["bonus_for_construction"] or self.trainer_params["extra_bonus"] or self.trainer_params["imitation_learning"] or self.trainer_params["reconstruct"]:
+                    # update best solution
+                    criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (obj[0]+obj[1]).clone()
+                    new_best, best_index = criterion[:, 0].view(batch_size, k).min(-1)
+                    index = new_best < best_reward
+                    best_reward[index] = new_best[index] # update best reward
+                    is_improved = (is_improved | index)
+                    rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size), best_index, :][index].clone() # update best solution
 
-            if self.model.training: batch_reward.append(rewards[:, 0].clone())
-            memory.rewards.append(rewards)
-            criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (obj[0] + obj[1]).clone()
-            memory.obj.append(criterion.clone())
-            # if self.args.problem == "CVRP":
-            #     memory.cum_demand.append(context[2])
-            #     memory.partial_sum_wrt_route_plan.append(context[3])
-            #     non_feasible_cost_total = torch.clamp_min(context[-1] - 1.00001, 0.0).sum(-1)
-            # elif self.args.problem == "TSPTW":
-            #     exceed_time_window = torch.clamp_min(context[1] - context[-1], 0.0)
-            #     if self.trainer_params["penalty_normalize"]:
-            #         try:
-            #             exceed_time_window = exceed_time_window / context[-1][:, 0]
-            #         except:
-            #             exceed_time_window = exceed_time_window / context[-1][:, :1]
-            #     out_node_penalty = (exceed_time_window > 1e-5).sum(-1) # (b*k)
-            #     memory.out_node_penalty.append(out_node_penalty)
-            #     non_feasible_cost_total = exceed_time_window.sum(-1)
-            #     memory.out_penalty.append(non_feasible_cost_total) # (b*k)
-            memory.out_node_penalty.append(out_node_penalty)  # (c, b*k)
-            memory.out_penalty.append(out_penalty)  # (c, b*k)
-            feasible = out_penalty.sum(0) <= 0.0
-            soft_infeasible = (out_penalty.sum(0) <= epsilon) & (out_penalty.sum(0) > 0.)
-            memory.feasible.append(feasible)
-            memory.soft_feasible.append(soft_infeasible)
+                if self.model.training: batch_reward.append(rewards[:, 0].clone())
+                memory.rewards.append(rewards)
+                criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (obj[0] + obj[1]).clone()
+                memory.obj.append(criterion.clone())
+                # if self.args.problem == "CVRP":
+                #     memory.cum_demand.append(context[2])
+                #     memory.partial_sum_wrt_route_plan.append(context[3])
+                #     non_feasible_cost_total = torch.clamp_min(context[-1] - 1.00001, 0.0).sum(-1)
+                # elif self.args.problem == "TSPTW":
+                #     exceed_time_window = torch.clamp_min(context[1] - context[-1], 0.0)
+                #     if self.trainer_params["penalty_normalize"]:
+                #         try:
+                #             exceed_time_window = exceed_time_window / context[-1][:, 0]
+                #         except:
+                #             exceed_time_window = exceed_time_window / context[-1][:, :1]
+                #     out_node_penalty = (exceed_time_window > 1e-5).sum(-1) # (b*k)
+                #     memory.out_node_penalty.append(out_node_penalty)
+                #     non_feasible_cost_total = exceed_time_window.sum(-1)
+                #     memory.out_penalty.append(non_feasible_cost_total) # (b*k)
+                memory.out_node_penalty.append(out_node_penalty)  # (c, b*k)
+                memory.out_penalty.append(out_penalty)  # (c, b*k)
+                feasible = out_penalty.sum(0) <= 0.0
+                soft_infeasible = (out_penalty.sum(0) <= epsilon) & (out_penalty.sum(0) > 0.)
+                memory.feasible.append(feasible)
+                memory.soft_feasible.append(soft_infeasible)
 
-            # next
-            t = t + 1
+                # next
+                t = t + 1
 
         # calculate improvement loss
         if self.model.training:
             if self.trainer_params["baseline"] != "share":
                 log_prob = torch.stack(memory.logprobs).view(T, batch_size, k)
-                reward = torch.stack(memory.rewards).sum(-1).view(T, batch_size, k)
+                reward = torch.stack(memory.rewards).sum(-1).view(T, batch_size, k) if T_pi == 0 else reward.view(T, batch_size, k)
                 baseline = 0. if self.trainer_params["baseline"] == "improve" else reward.mean(-1, keepdims=True)
                 advantage = reward - baseline
                 loss = - advantage * log_prob  # Minus Sign: To Increase REWARD

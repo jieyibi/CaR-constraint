@@ -965,7 +965,7 @@ class SINGLE_Decoder(nn.Module):
                         print("Gumbel noise contains NaN or Inf!")
                     score_clipped = score_clipped + gumbel_noise
                 score_masked = torch.where(mask, -1e4, score_clipped)
-                if i == 0 and isinstance(last_action, torch.Tensor):
+                if i == 0 and isinstance(last_action, torch.Tensor) and last_action[0,0] > 0:
                     score_masked.scatter_(1, last_action[:, :1], -1e4)
                 probs = torch.softmax(score_masked, dim=-1)
                 # shape: (bs, problem)
@@ -1173,7 +1173,7 @@ class kopt_Decoder(nn.Module):
             logits = torch.tanh(result) * self.model_params['logit_clipping']
             # assert (~mask).any(-1).all(), (i, (~mask).any(-1))
             logits[mask.clone()] = -1e30
-            if i == 0 and isinstance(last_action, torch.Tensor):
+            if i == 0 and isinstance(last_action, torch.Tensor) and last_action[0,0] > 0:
                 logits.scatter_(1, last_action[:, :1], -1e30)
             probs = torch.softmax(logits, dim=-1)
 

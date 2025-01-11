@@ -1009,3 +1009,29 @@ def row_wise_overlap_no_loop(tensor1, tensor2):
     overlap_matrix = (tensor1_expanded == tensor2_expanded)
     overlap_counts = overlap_matrix.any(dim=2).sum(dim=1)
     return overlap_counts
+
+def select_data_by_index(data, index):
+    """
+    Select specific elements from the first dimension of a tensor based on an index tensor.
+
+    Args:
+        data (torch.Tensor): The input tensor of shape (10, B, P) or (10, B, P, ..., x_n),
+                             where the first dimension is the dimension to select from.
+        index (torch.Tensor): The index tensor of shape (5, B), indicating which elements
+                              to select along the first dimension for each batch.
+
+    Returns:
+        torch.Tensor: The resulting tensor after selection, with shape (5, B, P, ..., x_n).
+    """
+    # Transpose the index tensor and add an extra dimension for compatibility
+    # Shape changes: (5, B) -> (5, B, 1,...)
+    expanded_index = index
+    for _ in range(len(data.shape)-2): expanded_index = expanded_index.unsqueeze(-1)
+
+    # Expand the index tensor to match the remaining dimensions of the data tensor
+    # The new shape will be (5, B, P, ..., x_n), matching the dimensions of `data`
+    expanded_index = expanded_index.expand(-1, -1, *data.shape[2:])
+
+    # Use torch.gather to select elements along the first dimension (dim=0)
+    selected_data = torch.gather(data, 0, expanded_index)
+    return selected_data
