@@ -690,13 +690,15 @@ class VRPBLTWEnv:
         # 2. capacity:
         # 2-1: cum_demand - 1.00001
         out_node_penalty = torch.cat([out_node_penalty, (context[2] > 1.00001).sum(-1).unsqueeze(0)], dim = 0)
-        out_penalty = torch.cat([out_penalty, torch.clamp_min(context[3] - 1.00001, 0.0).sum(dim=-1).unsqueeze(0)], dim = 0)
+        out_penalty = torch.cat([out_penalty, torch.clamp_min(context[2] - 1.00001, 0.0).sum(dim=-1).unsqueeze(0)],dim=0)
+        # out_penalty = torch.cat([out_penalty, torch.clamp_min(context[3] - 1.00001, 0.0).sum(dim=-1).unsqueeze(0)], dim = 0)
         # 2-2: backhaul: -cum_demand
         out_node_penalty = torch.cat([out_node_penalty, (context[2] < -0.00001).sum(-1).unsqueeze(0)], dim = 0)
         out_penalty = torch.cat([out_penalty, torch.clamp_min(-context[2], 0.0).sum(dim=-1).unsqueeze(0)], dim = 0)
         # 3. duration limit: cum_distance - self.route_limit
         out_node_penalty = torch.cat([out_node_penalty, (context[7] > (self.route_limit[0,0] + 0.00001)).sum(-1).unsqueeze(0)], dim = 0)
-        out_penalty = torch.cat([out_penalty, torch.clamp_min(context[9] - (self.route_limit.repeat_interleave(k, 0) + 0.00001), 0.0).sum(dim=-1).unsqueeze(0)], dim = 0)
+        out_penalty = torch.cat([out_penalty, torch.clamp_min(context[7] - (self.route_limit[0,0] + 0.00001), 0.0).sum(dim=-1).unsqueeze(0)], dim = 0)
+        # out_penalty = torch.cat([out_penalty, torch.clamp_min(context[9] - (self.route_limit.repeat_interleave(k, 0) + 0.00001), 0.0).sum(dim=-1).unsqueeze(0)], dim = 0)
 
         if out_reward:
             if isinstance(penalty_factor, torch.Tensor):

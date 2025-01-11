@@ -447,7 +447,7 @@ class Trainer:
                 cons_log_prob = prob_list
             else:
                 cons_log_prob = None
-            improve_loss, improve_reward, select_idx, best_solution, is_improved = self._improvement(env, self.trainer_params["epsilon"], cons_reward, batch_reward, weights, cons_log_prob)
+            improve_loss, improve_reward, select_idx, best_solution, best_reward, is_improved = self._improvement(env, self.trainer_params["epsilon"], cons_reward, batch_reward, weights, cons_log_prob)
             # if "TSP" not in self.args.problem: self.metric_logger.dummy_size.update(env.dummy_size, batch_size)
         else:
             improve_loss, improve_reward, select_idx, best_solution = 0.0, None, None, None
@@ -517,7 +517,10 @@ class Trainer:
                                                            backhaul_mask=self.trainer_params["backhaul_mask"],
                                                            penalty_normalize=self.trainer_params["penalty_normalize"])
                 prob_list = torch.cat((prob_list, prob[:, :, None]), dim=2) # shape: (batch, pomo, solution)
-            reconstruct_loss = self._get_reconstruction_output(infeasible, reward, prob_list, probs_return_list, self.trainer_params["epsilon"])
+            if self.trainer_params["reconstruct_improve_bonus"]:
+                rc_reward = (-torch.stack(reward).sum(0)) # shape: (batch, pomo)
+                improve_reward = torch.clamp_min(best_reward.view(batch_size, 1) - rc_reward, 0.0)
+            reconstruct_loss = self._get_reconstruction_output(infeasible, reward, prob_list, probs_return_list, self.trainer_params["epsilon"], improve_reward)
 
         if self.epoch == 1: self._print_log()
         if accumulation_step == 0:
@@ -686,7 +689,7 @@ class Trainer:
                     selected, _, _ = self.model(state, pomo=self.env_params["pomo_start"], candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None)
                     # shape: (batch, pomo)
                     state, reward, done, infeasible = env.step(selected, soft_constrained = self.trainer_params["soft_constrained"], backhaul_mask = self.trainer_params["backhaul_mask"])
-                # Return
+                # Retur
                 aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible = self._get_reconstruction_output_val(aug_factor, infeasible, reward, aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible)
                 if self.rank == 0: print(f"Rank {self.rank} >> val reconstruction time: ", time.time() - tik)
             #############################Use mask to construct the solutions again###################################
@@ -776,7 +779,7 @@ class Trainer:
         solution = env.selected_node_list.clone() # shape: (batch, pomo, solution)
         if not self.trainer_params["improvement_only"]: # if yes, already generate k solutions for each instance
             # select top k
-            if self.trainer_params["select_top_k"] < self.env_params["pomo_size"]:
+            if self.trainer_params["select_top_k"] < env.pomo_size:
                 solution, select_idx = select4improve(solution, cons_reward, strategy=self.trainer_params["select_strategy"],
                                                       K=self.trainer_params["select_top_k"], rnd_prob=self.trainer_params["stochastic_probability"],
                                                       diversity=self.trainer_params["diversity"])
@@ -786,6 +789,7 @@ class Trainer:
                     cons_log_prob = cons_log_prob[torch.arange(env.batch_size)[:, None], select_idx]
                     _, unconfident_indices = torch.topk(cons_log_prob, k=self.trainer_params["k_unconfident"], dim=-1, largest=False)
             else:
+                # just for testing
                 select_idx = torch.arange(env.pomo_size)[None, :].repeat(env.batch_size, 1)
                 feasibility_history = ~env.infeasible
                 _, topk2 = select4improve(solution, cons_reward, strategy=self.trainer_params["select_strategy"],
@@ -819,7 +823,15 @@ class Trainer:
             context2[:, -1] = feasibility_history.view(-1) # current feasibility
             feasibility_history = feasibility_history.view(-1, 1).expand(batch_size * k, total_history)
         action = None
-        rec_best = rec.view(batch_size, k, -1)[torch.arange(batch_size),best_index,:].clone()
+        # get the best solution from constrution, shape: (batch, solution_size)
+        if self.trainer_params["reconstruct"] and self.trainer_params["select_strategy"] != "quality":
+            # in this case, the selected solutions will not be the best
+            best_reward, best_index = (-cons_reward.reshape(batch_size, env.pomo_size)).min(-1)
+            best_solution = env.selected_node_list.reshape(batch_size, env.pomo_size, -1)[torch.arange(batch_size),best_index, :].clone()
+            if "TSP" not in self.args.problem: best_solution = get_solution_with_dummy_depot(best_solution.view(batch_size, 1, -1), env.problem_size)
+            rec_best = sol2rec(best_solution).view(batch_size, -1)
+        else:
+            rec_best = rec.view(batch_size, k, -1)[torch.arange(batch_size),best_index,:].clone()
         # print(f"!!!!!!!constructed best: {remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size)[:3]}")
         is_improved = torch.zeros(batch_size).bool()
         # log top k
@@ -1037,7 +1049,7 @@ class Trainer:
         memory.clear_memory()
         # print(f"!!!!!!!improved best: {remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size)[:3]}")
 
-        return loss_mean, improve_reward, select_idx, remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size), is_improved
+        return loss_mean, improve_reward, select_idx, remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size), best_reward, is_improved
 
     def _val_improvement(self, env, aug_factor):
 
@@ -1394,7 +1406,7 @@ class Trainer:
 
         if prob_list is not None: return loss_mean
 
-    def _get_reconstruction_output(self, infeasible, reward, prob_list=None, probs_return_list=None, epsilon=None):
+    def _get_reconstruction_output(self, infeasible, reward, prob_list=None, probs_return_list=None, epsilon=None, improve_reward=None):
         # Input.shape
         # infeasible: (batch, pomo)
         # reward (list or tensor): (batch, pomo)
@@ -1481,6 +1493,8 @@ class Trainer:
                 if self.trainer_params["baseline"] == "group":
                     baseline = reward.float().mean(dim=1, keepdims=True)
                     advantage = reward - baseline  # (batch, pomo)
+                    if self.trainer_params["reconstruct_improve_bonus"]:
+                        advantage += improve_reward - improve_reward.float().mean(dim=1, keepdims=True)
                     log_prob = prob_list.log().sum(dim=2)  # (batch, pomo)
                 else:
                     raise NotImplementedError

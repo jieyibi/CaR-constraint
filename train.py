@@ -105,11 +105,12 @@ def args2dict(args):
                       "val_init_sol_strategy": args.val_init_sol_strategy,
                       "neighborhood_search": args.neighborhood_search, "k_unconfident": args.k_unconfident,
                       "improvement_method": args.improvement_method, "rm_num": args.rm_num, "insert_before": args.insert_before,
-                      "improve_steps": args.improve_steps, "total_history": args.total_history,
+                      "improve_steps": args.improve_steps, "dummy_improve_steps": args.dummy_improve_steps, "total_history": args.total_history,
                       "stochastic_probability": args.stochastic_probability, "select_strategy": args.select_strategy,
                       "select_top_k": args.select_top_k, "diversity": args.diversity,
                       "validation_improve_steps": args.validation_improve_steps,
-                      "seperate_obj_penalty": args.seperate_obj_penalty, "reconstruct": args.reconstruct,
+                      "seperate_obj_penalty": args.seperate_obj_penalty,
+                      "reconstruct": args.reconstruct, "reconstruct_improve_bonus": args.reconstruct_improve_bonus,
                       # polynet
                       "train_z_sample_size": args.train_z_sample_size, "val_z_sample_size": args.val_z_sample_size,
                       "amp_training": args.amp_training,
@@ -261,7 +262,9 @@ if __name__ == "__main__":
     parser.add_argument('--boundary', type=float, default=0.5)
     parser.add_argument('--insert_before', type=bool, default=True)
     parser.add_argument('--rm_num', type=int, default=1)
-    parser.add_argument('--reconstruct', type=bool, default=False)
+    parser.add_argument('--reconstruct', type=bool, default=True)
+    parser.add_argument('--reconstruct_improve_bonus', type=bool, default=True)
+    parser.add_argument('--reconstruct_bonus_weight', type=float, default=1.)
     parser.add_argument('--neighborhood_search', type=bool, default=False)
     parser.add_argument('--k_unconfident', type=int, default=10)
     parser.add_argument('--init_sol_strategy', type=str, default="POMO", choices=["random", "greedy_feasible", "random_feasible", "POMO"])
@@ -270,8 +273,9 @@ if __name__ == "__main__":
     parser.add_argument('--max_dummy_size', type=int, default=18)
     parser.add_argument('--improve_start_when_dummy_ok', type=bool, default=True)
     parser.add_argument('--improve_steps', type=int, default=5)
+    parser.add_argument('--dummy_improve_steps', type=int, default=10)
     parser.add_argument('--validation_improve_steps', type=int, default=20)
-    parser.add_argument('--select_strategy', type=str, default="quality", choices=["quality", "diversity", "quality_stochastic", "diversity_stochastic", "stochastic"])
+    parser.add_argument('--select_strategy', type=str, default="stochastic", choices=["quality", "diversity", "quality_stochastic", "diversity_stochastic", "stochastic"])
     parser.add_argument('--select_top_k', type=int, default=5)
     # parser.add_argument('--validation_select_top_k', type=int, default=20)
     parser.add_argument('--stochastic_probability', type=float, default=0.5)
@@ -294,7 +298,7 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=2023)
     parser.add_argument('--log_dir', type=str, default="./results")
     parser.add_argument('--no_cuda', action='store_true')
-    parser.add_argument('--gpu_id', type=str, default="1")
+    parser.add_argument('--gpu_id', type=str, default="3")
     parser.add_argument('--world_size', type=int, default=1)
     parser.add_argument("--multiple_gpu", type=bool, default=False)
     parser.add_argument('--occ_gpu', type=float, default=0., help="occupy (X)% GPU memory in advance, please use sparingly.")
@@ -353,19 +357,21 @@ if __name__ == "__main__":
     # note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay5_0001_cons10l+p"
     # note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay5_0001_RC"
     # note = "_VRPBLTW100_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay10_0001"  #
-    note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1InsAfterN2S_diversity_IL_NonLinear_decay5_0001_co10"
+    note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprSample5_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1InsAfterN2S_diversity_IL_NonLinear_decay5_0001_co10_RCbonus"
     # note = "debug"
     # note = "test "
     if "debug" in note:
-        # args.wandb_logger = False
-        # args.tb_logger = False
-        args.train_episodes = args.train_episodes // 8
-        # args.validation_batch_size = 5
-        # args.val_episodes = 2
-        args.train_batch_size = args.train_batch_size // 8
-        args.select_top_k = 50
-        args.improve_start_when_dummy_ok = True
-        args.max_dummy_size = 20
+        args.wandb_logger = False
+        args.tb_logger = False
+        # args.train_episodes = args.train_episodes // 8
+        # args.train_batch_size = args.train_batch_size // 8
+        args.train_episodes = 3
+        args.validation_batch_size = 5
+        args.val_episodes = 2
+        args.improve_start_when_dummy_ok = False
+        # args.select_top_k = 50
+        # args.improve_start_when_dummy_ok = True
+        # args.max_dummy_size = 20
     if "test" in note:
         args.wandb_logger = False
         args.tb_logger = False
