@@ -984,7 +984,7 @@ class SINGLE_Decoder(nn.Module):
 
                 # Record log_likelihood and Entropy
                 if self.training:
-                    loss_now = F.log_softmax(score_masked, dim=-1).gather(-1, action).squeeze()
+                    loss_now = F.log_softmax(score_masked + 1e-5, dim=-1).gather(-1, action).squeeze()
                     if i > 0:
                         ll = ll + torch.where(stopped, loss_now * 0, loss_now)
                     else:
@@ -1171,15 +1171,26 @@ class kopt_Decoder(nn.Module):
 
             # Calc probs
             logits = torch.tanh(result) * self.model_params['logit_clipping']
-            # assert (~mask).any(-1).all(), (i, (~mask).any(-1))
+            if torch.isnan(logits).any():
+                print("logits contains NaN!")
+                logits = torch.where(torch.isnan(logits), torch.zeros_like(logits), logits)
+            assert (~mask).any(-1).all(), (i, (~mask).any(-1))
             logits[mask.clone()] = -1e30
             if i == 0 and isinstance(last_action, torch.Tensor) and last_action[0,0] > 0:
                 logits.scatter_(1, last_action[:, :1], -1e30)
+            if torch.isnan(mask).any():
+                print("mask contains NaN!")
+                logits = torch.where(torch.isnan(logits), torch.zeros_like(logits), logits)
             probs = torch.softmax(logits, dim=-1)
 
             # Sample action for a_i
             if fixed_action is None:
-                action = probs.multinomial(1)
+                try:
+                    action = probs.multinomial(1)
+                except:
+                    print(probs)
+                    probs = torch.clamp(probs, min=0)
+                    action = probs.multinomial(1)
                 value_max, action_max = probs.max(-1, True)  ### fix bug of pytorch
                 action = torch.where(1 - value_max.view(-1, 1) < 1e-5, action_max.view(-1, 1), action)  ### fix bug of pytorch
             else:
@@ -1190,7 +1201,7 @@ class kopt_Decoder(nn.Module):
 
             # Record log_likelihood and Entropy
             if self.training:
-                loss_now = F.log_softmax(logits, dim=-1).gather(-1, action).squeeze()
+                loss_now = F.log_softmax(logits + 1e-5, dim=-1).gather(-1, action).squeeze()
                 if i > 0:
                     ll = ll + torch.where(stopped, loss_now * 0, loss_now)
                 else:
@@ -1327,7 +1338,7 @@ class N2S_Decoder(nn.Module):
         if pre_action is not None and pre_action[0, 0] > 0:
             action_removal_table[arange, pre_action[:, 0]] = -5e4
         log_ll_removal = (
-            F.log_softmax(action_removal_table, dim=-1) if self.training else None
+            F.log_softmax(action_removal_table + 1e-5, dim=-1) if self.training else None
         )  # log-likelihood
         probs_removal = F.softmax(action_removal_table, dim=-1)
 
@@ -1351,7 +1362,7 @@ class N2S_Decoder(nn.Module):
         # avoid remove and insert at the same place
         action_reinsertion_table[arange, action_removal[:, 0]] = -5e4
         log_ll_reinsertion = (
-            F.log_softmax(action_reinsertion_table, dim=-1)
+            F.log_softmax(action_reinsertion_table + 1e-5, dim=-1)
             if self.training else None
         )
         probs_reinsertion = F.softmax(action_reinsertion_table, dim=-1)

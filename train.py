@@ -14,14 +14,6 @@ import warnings
 warnings.filterwarnings('ignore')
 
 def setup(rank, world_size):
-    version_note = "unified_Attetion_based_decoder_depth1_with_only_last_move_context_woRNN_withAMP" # 1226
-    version_note = "unified_Attetion_based_decoder_depth1_with_only_last_move_context_withRNN_withAMP"  # 1227
-    version_note = "Improvement_only_randomInit_GroupBaseline_Impr2_Impro5Val20"  # 1228
-    version_note = "unified_encoder_seperate_decoder_GroupBaseline_ImprTop5Qual_Impro5Val20_LoRA32" # 1229
-    version_note = "TSPTW_unified_encoder_seperate_decoder_GroupBaseline_ImprTop5Qual_Impro5Val20" #1230_LoRA32
-    version_note = "TSPTW_unified_encoder_withRNNdecoder_GroupBaseline_ImprTop5Qual_Impro5Val20"  # 1231_LoRA32
-    version_note = "TSPTW_unified_encoder_seperate_decoder_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP"  # 1232 amp: top 5 to 10
-    version_note = "add_share_baseline" # 1233
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '1233'
     dist.init_process_group(rank=rank, world_size=world_size, backend="nccl")
@@ -47,7 +39,7 @@ def args2dict(args):
     tester_params = {"eval_only": args.eval_only, "test_episodes": args.test_episodes,
                      "test_batch_size": args.test_batch_size, "test_dataset": args.test_dataset,
                      "test_z_sample_size": args.test_z_sample_size, "test_pomo_size": args.test_pomo_size,
-                     "sample_size": args.sample_size, "aux_mask": args.aux_mask,
+                     "sample_size": args.sample_size, "aux_mask": args.aux_mask, "is_lib": args.is_lib,
                     }
 
     model_params = {"embedding_dim": args.embedding_dim, "sqrt_embedding_dim": args.sqrt_embedding_dim,
@@ -84,8 +76,9 @@ def args2dict(args):
                       "validation_batch_size": args.validation_batch_size, "val_pomo_size": args.val_pomo_size,
                       "model_save_interval": args.model_save_interval, "checkpoint": args.checkpoint, "baseline": args.baseline,
                       "load_optimizer": args.load_optimizer, "uncertainty_weight": args.uncertainty_weight,
-                      "dynamic_coefficient": args.dynamic_coefficient,
+                      "dynamic_coefficient": args.dynamic_coefficient, "coefficient": args.coefficient,
                       # constraints
+                      "generate_PI_mask": args.generate_PI_mask, "pip_step": args.pip_step,
                       "soft_constrained": args.soft_constrained, "backhaul_mask": args.backhaul_mask,
                       "non_linear": args.non_linear, "non_linear_cons": args.non_linear_cons, "epsilon": args.epsilon,
                       "epsilon_base": args.epsilon_base, "epsilon_decay_beta": args.epsilon_decay_beta,
@@ -102,14 +95,14 @@ def args2dict(args):
                       # improvement
                       "improvement_only": args.improvement_only, "init_sol_strategy": args.init_sol_strategy,
                       "max_dummy_size": args.max_dummy_size, "improve_start_when_dummy_ok": args.improve_start_when_dummy_ok,
-                      "val_init_sol_strategy": args.val_init_sol_strategy,
+                      "val_init_sol_strategy": args.val_init_sol_strategy, "select_top_k_val": args.select_top_k_val,
                       "neighborhood_search": args.neighborhood_search, "k_unconfident": args.k_unconfident,
                       "improvement_method": args.improvement_method, "rm_num": args.rm_num, "insert_before": args.insert_before,
                       "improve_steps": args.improve_steps, "dummy_improve_steps": args.dummy_improve_steps,
                       "total_history": args.total_history, "dummy_improve_selected": args.dummy_improve_selected,
                       "stochastic_probability": args.stochastic_probability, "select_strategy": args.select_strategy,
                       "select_top_k": args.select_top_k, "diversity": args.diversity,
-                      "validation_improve_steps": args.validation_improve_steps,
+                      "validation_improve_steps": args.validation_improve_steps, "val_reconstruct_times": args.val_reconstruct_times,
                       "seperate_obj_penalty": args.seperate_obj_penalty,
                       "reconstruct": args.reconstruct, "reconstruct_improve_bonus": args.reconstruct_improve_bonus,
                       # polynet
@@ -138,7 +131,7 @@ def main(rank, world_size, args, env_params, model_params, optimizer_params, tra
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Towards Unified Models for Routing Problems")
     # env_params
-    parser.add_argument('--problem', type=str, default="VRPBLTW", choices=["Train_ALL", "CVRP", "OVRP", "VRPB", "VRPL", "VRPTW", "OVRPTW",
+    parser.add_argument('--problem', type=str, default="TSPTW", choices=["Train_ALL", "CVRP", "OVRP", "VRPB", "VRPL", "VRPTW", "OVRPTW",
                                                                              "OVRPB", "OVRPL", "VRPBL", "VRPBTW", "VRPLTW", "TSPTW", "TSPDL",
                                                                              "OVRPBL", "OVRPBTW", "OVRPLTW", "VRPBLTW", "OVRPBLTW"])
     parser.add_argument('--tw_type', type=str, default="da_silva", choices=["da_silva", "cappart", "zhang", "random"])
@@ -150,7 +143,7 @@ if __name__ == "__main__":
     parser.add_argument('--pomo_start', type=bool, default=False)
     parser.add_argument('--pomo_feasible_start', type= bool, default=False)
     parser.add_argument('--fsb_start_delay', type=int, default=10000)
-    parser.add_argument('--val_dataset', type=str, nargs='+', default =None)
+    parser.add_argument('--val_dataset', type=str, nargs='+', default =["tsptw50_da_silva_uniform.pkl"]) # ["tsptw100_da_silva_uniform_varyN.pkl"]
 
     # tester_params
     parser.add_argument('--eval_only', type=bool, default=False)
@@ -159,9 +152,10 @@ if __name__ == "__main__":
     parser.add_argument("--test_pomo_size", type=int, default=1)
     parser.add_argument('--test_dataset', type=str, nargs='+', default=None)#["tsptw100_da_silva_uniform.pkl"]
     parser.add_argument('--test_z_sample_size', type=int, default=0)
+    parser.add_argument('--is_lib', type=bool, default=False)
     parser.add_argument('--eval_type', type=str, default="argmax", choices=["argmax", "softmax"])
     parser.add_argument('--sample_size', type=int, default = 1)
-    parser.add_argument('--aux_mask', type=bool, default=True)
+    parser.add_argument('--aux_mask', type=bool, default=False, help="only activates when problem == VRPBLTW")
 
     # model_params
     parser.add_argument('--model_type', type=str, default="SINGLE", choices=["SINGLE", "MTL", "MOE"])
@@ -172,7 +166,7 @@ if __name__ == "__main__":
     parser.add_argument('--decoder_layer_num', type=int, default=1, help="the number of MHA in decoder")
     parser.add_argument('--unified_encoder', type=bool, default=True)
     parser.add_argument('--unified_decoder', type=bool, default=False)
-    parser.add_argument('--n2s_decoder', type=bool, default=True)
+    parser.add_argument('--n2s_decoder', type=bool, default=False)
     parser.add_argument('--v_range', type=float, default=6.0, help='to control the entropy')
     parser.add_argument('--qkv_dim', type=int, default=16)
     parser.add_argument('--head_num', type=int, default=8)
@@ -216,15 +210,18 @@ if __name__ == "__main__":
     parser.add_argument('--accumulation_steps', type=int, default=1)
     parser.add_argument('--train_batch_size', type=int, default=64*2)
     parser.add_argument('--validation_interval', type=int, default=200)
-    parser.add_argument('--validation_batch_size', type=int, default=1000)
-    parser.add_argument('--val_episodes', type=int, default=1000)
+    parser.add_argument('--validation_batch_size', type=int, default=3334)
+    parser.add_argument('--select_top_k_val', type=int, default=1)
+    parser.add_argument('--val_episodes', type=int, default=10000)
     parser.add_argument("--val_pomo_size", type=int, default=1)
     parser.add_argument('--model_save_interval', type=int, default=50)
 
     # constraints
+    parser.add_argument("--generate_PI_mask", type=bool, default=True)
+    parser.add_argument('--pip_step', type=int, default=1)
     parser.add_argument('--soft_constrained', type=bool, default=True)
     parser.add_argument('--backhaul_mask', type=str, default="soft", choices=["soft", "hard"])
-    parser.add_argument('--non_linear', type=str, default="decayed_epsilon", choices=[None, "fixed_epsilon", "decayed_epsilon", "step", "scalarization"])
+    parser.add_argument('--non_linear', type=str, default=None, choices=[None, "fixed_epsilon", "decayed_epsilon", "step", "scalarization"])
     # "step" means separating the target of cost and penalty during improvement training
     parser.add_argument('--epsilon', type=float, default=3.67)
     parser.add_argument('--epsilon_base', type=float, default=5.)
@@ -259,12 +256,13 @@ if __name__ == "__main__":
 
     # improvement
     parser.add_argument('--improvement_only', type=bool, default=False)
-    parser.add_argument('--improvement_method', type=str, default="rm_n_insert", choices=["rm_n_insert", "kopt", "all"])
+    parser.add_argument('--improvement_method', type=str, default="kopt", choices=["rm_n_insert", "kopt", "all"])
     parser.add_argument('--boundary', type=float, default=0.5)
     parser.add_argument('--insert_before', type=bool, default=True)
     parser.add_argument('--rm_num', type=int, default=1)
-    parser.add_argument('--reconstruct', type=bool, default=True)
-    parser.add_argument('--reconstruct_improve_bonus', type=bool, default=True)
+    parser.add_argument('--coefficient', type=float, default=100)
+    parser.add_argument('--reconstruct', type=bool, default=False)
+    parser.add_argument('--reconstruct_improve_bonus', type=bool, default=False)
     parser.add_argument('--reconstruct_bonus_weight', type=float, default=1.)
     parser.add_argument('--neighborhood_search', type=bool, default=False)
     parser.add_argument('--k_unconfident', type=int, default=10)
@@ -272,11 +270,12 @@ if __name__ == "__main__":
     parser.add_argument('--val_init_sol_strategy', type=str, default="POMO", choices=["random", "greedy_feasible", "random_feasible", "POMO"])
     parser.add_argument('--POMO_checkpoint', type=str, default="results/20240831_221004_TSPTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_construction_only/epoch-5000.pt")
     parser.add_argument('--max_dummy_size', type=int, default=18)
-    parser.add_argument('--improve_start_when_dummy_ok', type=bool, default=True)
-    parser.add_argument('--improve_steps', type=int, default=4)
-    parser.add_argument('--dummy_improve_steps', type=int, default=10)
+    parser.add_argument('--improve_start_when_dummy_ok', type=bool, default=False)
+    parser.add_argument('--improve_steps', type=int, default=5)
+    parser.add_argument('--dummy_improve_steps', type=int, default=0)
     parser.add_argument('--dummy_improve_selected', type=str, default="random", choices=["random", "topk"])
     parser.add_argument('--validation_improve_steps', type=int, default=20)
+    parser.add_argument('--val_reconstruct_times', type=int, default=1)
     parser.add_argument('--select_strategy', type=str, default="quality", choices=["quality", "diversity", "quality_stochastic", "diversity_stochastic", "stochastic"])
     parser.add_argument('--select_top_k', type=int, default=5)
     # parser.add_argument('--validation_select_top_k', type=int, default=20)
@@ -284,7 +283,7 @@ if __name__ == "__main__":
     parser.add_argument('--diversity', type=str, default="kendall_tau_distance", choices=["kendall_tau_distance", "jaccard_distance"])
     parser.add_argument('--total_history', type=int, default=3)
     parser.add_argument('--with_infsb_feature', type=bool, default=True)
-    parser.add_argument('--supplement_feature_dim', type=int, default=17) # for cvrp:5; for tsptw:5; for vrpbltw: 17
+    parser.add_argument('--supplement_feature_dim', type=int, default=5) # for cvrp:5; for tsptw:5; for vrpbltw: 17
     parser.add_argument('--with_explore_stat_feature', type=bool, default=True)
     parser.add_argument('--with_RNN', type=bool, default=True)
     parser.add_argument('--k_max', type=int, default=4)
@@ -334,6 +333,8 @@ if __name__ == "__main__":
     # note = "_TSPTW50_rmPOMOstart_Soft_sperateModel_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP"
     # note = "_TSPTW50_Hard_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP"
     # note = "_TSPTW50_rmPOMOstart_Soft_sperateModel_seperateTraining_GroupBaseline_Impr10sampledFromPOMO_Impro5Val20_AMP"
+    # note = "_TSPTW50Hard_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL[rerun]"
+    note = "_TSPTW50Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL_PIP"
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_tw+capacity"
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_learnable_reward" #_learnable_reward
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_primal_dual" # currently not the primary objective
@@ -352,14 +353,15 @@ if __name__ == "__main__":
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_NonLinear_scalarization_imprOnly" # neighbourhood search
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay5_0001_cons10l+p" #
     # note = "_VRPBLTW_rmPOMOstart_Hard_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear3p67"
-    # note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay5_0001_cons10l+p" #
-    # note = "_VRPBLTW100_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop3Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_diversity_IL"  #
+    # note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_diversity_IL_NonLinear_decay5_0001_dynamicco" #
+    # note = "_VRPBLTW100_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop3Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_diversity_IL_NonLinear_decay5_0001"  #
     # note = "_VRPBLTW100_rmPOMOstart_Soft_construction_only" #
     # note = "_VRPBLTW100_rmPOMOstart_Hard_construction_only" #
     # note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay5_0001_cons10l+p"
     # note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay5_0001_RC"
     # note = "_VRPBLTW100_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay10_0001"  #
-    note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprTop5Qual_Impro4Rndfrom10Val20_AMP_warmstart_noregnobonus_Rmx1InsAfterN2S_diversity_IL_NonLinear_decay5_0001_co10_RCbonus"
+    # note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprSample5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1InsAfterN2S_diversity_IL_NonLinear_decay5_0001_co10_RC"
+    # note = "_VRPBLTW100_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprREALTop3Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_diversity_IL"  #
     # note = "debug"
     # note = "test "
     if "debug" in note:

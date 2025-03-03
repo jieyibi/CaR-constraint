@@ -20,6 +20,8 @@ EPSILON = {
     200: 7.4
 }
 
+EPSILON_hardcoded = 1.85
+
 @dataclass
 class Reset_State:
     node_xy: torch.Tensor = None
@@ -227,9 +229,9 @@ class TSPTWEnv:
         done = False
         return self.step_state, reward, done
 
-    def step(self, selected, visit_mask_only =True, out_reward = False, simulation=False,
-             infsb_level=False, return_route=False, safety_layer=None,
-             simulate_and_val=None, use_sl_mask=False, soft_constrained = False, backhaul_mask = None, penalty_normalize=False):
+    def step(self, selected, visit_mask_only =True, out_reward = False,
+             generate_PI_mask=False, use_predicted_PI_mask=False, pip_step=1,
+             soft_constrained = False, backhaul_mask = None, penalty_normalize=False):
         # selected.shape: (batch, pomo)
 
         # Dynamic-1
@@ -271,146 +273,9 @@ class TSPTWEnv:
                                  self.node_tw_start[:, None, :].expand(-1, self.pomo_size, -1))
         node_tw_end = self.node_tw_end[:, None, :].expand(-1, self.pomo_size, -1)
 
-        # simulate the right infsb mask and see ATTENTION!
-        if simulation and self.selected_count < self.problem_size -1:
-            if isinstance(simulation, bool):
-                unvisited = torch.masked_select(
-                    torch.arange(self.problem_size).unsqueeze(0).unsqueeze(0).expand(self.batch_size, self.pomo_size, self.problem_size),
-                    self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
-                two_step_unvisited = unvisited.unsqueeze(2).repeat(1, 1, self.problem_size-self.selected_count, 1)
-                diag_element = torch.diag_embed(torch.diagonal(two_step_unvisited, dim1=-2, dim2=-1))
-                two_step_idx = torch.masked_select(two_step_unvisited, diag_element==0).reshape(self.batch_size, self.pomo_size, self.problem_size-self.selected_count, -1)
-
-                # add arrival_time of the first-step nodes
-                first_step_current_coord = self.node_xy.unsqueeze(1).repeat(1,self.pomo_size,1,1).gather(dim=2, index = unvisited.unsqueeze(3).expand(-1, -1, -1, 2))
-                # first_step_new_length = (first_step_current_coord - current_coord.unsqueeze(2).repeat(1,1,self.problem_size-self.selected_count,1)).norm(p=2, dim=-1)
-                # current_time = self.current_time.unsqueeze(-1).repeat(1, 1, self.problem_size - self.selected_count)
-                # first_step_tw_end = torch.masked_select(node_tw_end, self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
-                # node_tw_start = self.node_tw_start[:, None, :].expand(-1, self.pomo_size, -1)
-                # first_step_tw_start = torch.masked_select(node_tw_start, self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
-                # node_service_time = self.node_service_time[:, None, :].expand(-1, self.pomo_size, -1)
-                # first_step_node_service_time= torch.masked_select(node_service_time, self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
-                # first_step_current_time = torch.max(current_time + first_step_new_length / self.speed, first_step_tw_start) + first_step_node_service_time
-                first_step_arrival_time = torch.masked_select(next_arrival_time, self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
-
-                # add arrival_time of the second-step nodes
-                two_step_tw_end = torch.masked_select(node_tw_end, self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
-                two_step_tw_end = two_step_tw_end.unsqueeze(2).repeat(1, 1, self.problem_size-self.selected_count, 1)
-                two_step_tw_end = torch.masked_select(two_step_tw_end, diag_element==0).reshape(self.batch_size, self.pomo_size, self.problem_size-self.selected_count, -1)
-
-                node_tw_start = self.node_tw_start[:, None, :].expand(-1, self.pomo_size, -1)
-                two_step_tw_start = torch.masked_select(node_tw_start, self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
-                two_step_tw_start = two_step_tw_start.unsqueeze(2).repeat(1, 1, self.problem_size-self.selected_count, 1)
-                two_step_tw_start = torch.masked_select(two_step_tw_start, diag_element==0).reshape(self.batch_size, self.pomo_size, self.problem_size-self.selected_count, -1)
-
-                node_service_time = self.node_service_time[:, None, :].expand(-1, self.pomo_size, -1)
-                two_step_node_service_time= torch.masked_select(node_service_time, self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
-                two_step_node_service_time = two_step_node_service_time.unsqueeze(2).repeat(1, 1, self.problem_size-self.selected_count, 1)
-                two_step_node_service_time = torch.masked_select(two_step_node_service_time, diag_element==0).reshape(self.batch_size, self.pomo_size, self.problem_size-self.selected_count, -1)
-
-                two_step_current_coord = first_step_current_coord.unsqueeze(2).repeat(1, 1, self.problem_size-self.selected_count, 1, 1)
-                two_step_current_coord = torch.masked_select(two_step_current_coord, diag_element.unsqueeze(-1).expand(-1, -1, -1, -1, 2) == 0).reshape(self.batch_size, self.pomo_size, self.problem_size - self.selected_count, -1, 2)
-                second_step_new_length = (two_step_current_coord - first_step_current_coord.unsqueeze(3).repeat(1,1,1,self.problem_size-self.selected_count-1,1)).norm(p=2, dim=-1)
-                first_step_arrival_time = first_step_arrival_time.unsqueeze(-1).repeat(1, 1, 1, self.problem_size - self.selected_count-1)
-                second_step_arrival_time = torch.max(first_step_arrival_time + second_step_new_length / self.speed, two_step_tw_start) + two_step_node_service_time
-
-                # time window constraint
-                #   current_time: the end time of serving the current node
-                #   max(current_time + travel_time, tw_start) or current_time + travel_time <= tw_end
-                # feasibility judgement
-                delta_t = self.env_params["random_delta_t"] * torch.rand(size=second_step_arrival_time.size())
-                second_step_arrival_time += delta_t
-                infeasible_mark = (second_step_arrival_time > two_step_tw_end + round_error_epsilon)
-                selectable = (infeasible_mark == False).all(dim=-1)
-                self.global_mask = infeasible_mark.sum(-1) / infeasible_mark.size(-1)
-                self.global_mask_ninf_flag = torch.full((self.batch_size, self.pomo_size, self.problem_size), float('-inf'))
-                self.global_mask_ninf_flag.masked_scatter_(self.visited_ninf_flag == 0, self.global_mask)
-
-                if self.env_params["reverse"]:
-                    self.simulated_ninf_flag = torch.zeros((self.batch_size, self.pomo_size, self.problem_size))
-                    unselectable = (selectable == False)
-                    unselectable_indices = unselectable.nonzero(as_tuple=False)
-                    unvisited_indices = unvisited[unselectable_indices[:, 0], unselectable_indices[:, 1], unselectable_indices[:, 2]]
-                    self.simulated_ninf_flag[unselectable_indices[:, 0], unselectable_indices[:, 1], unvisited_indices] = float('-inf')
-                else: # default
-                    self.simulated_ninf_flag = torch.full((self.batch_size, self.pomo_size, self.problem_size), float('-inf'))
-                    selected_indices = selectable.nonzero(as_tuple=False)
-                    unvisited_indices = unvisited[selected_indices[:, 0], selected_indices[:, 1], selected_indices[:, 2]]
-                    self.simulated_ninf_flag[selected_indices[:, 0], selected_indices[:, 1], unvisited_indices] = 0.
-
-                # self.global_mask = selectable.sum(-1) / selectable.size(-1)
-                # torch.masked_select(simulated_ninf_flag, self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)[selectable==False] = float('-inf')
-                # for b in range(self.batch_size):
-                #     for p in range(self.pomo_size):
-                #         for i in range(self.problem_size-self.selected_count):
-                #             if selectable[b,p,i]:
-                #                 simulated_ninf_flag[b,p,unvisited[b,p,i]] = 0.
-
-            else: # use pretrained safety layer
-                node_xy = self.node_xy
-                if self.problem in ["TSPTW"]:
-                    node_tw_start = self.node_tw_start
-                    node_tw_end = self.node_tw_end
-                    # shape: (batch, problem)
-                    feature = torch.cat((node_xy, node_tw_start[:, :, None], node_tw_end[:, :, None]), dim=2)
-                    # shape: (batch, problem, 4)
-                elif self.problem in ['TSPDL']:
-                    node_demand = self.node_demand
-                    node_draft_limit = self.node_draft_limit
-                    feature = torch.cat((node_xy, node_demand[:, :, None], node_draft_limit[:, :, None]), dim=2)
-                else:
-                    raise NotImplementedError
-
-                with torch.no_grad():
-                    simulation_safety_layer = simulation
-                    simulation_safety_layer.eval()
-                    self.simulated_ninf_flag = simulation_safety_layer(features=feature[:, None, :, :].repeat(1, self.pomo_size, 1, 1).reshape(self.batch_size * self.pomo_size, self.problem_size, -1),
-                                                        unvisited=(self.visited_ninf_flag == float('-inf')).reshape(self.batch_size * self.pomo_size, -1),
-                                                        current_node=self.current_node.reshape(self.batch_size * self.pomo_size, -1),
-                                                        current=self.timestamps[:, :, -1].reshape(self.batch_size * self.pomo_size, -1),
-                                                        no_sigmoid=False).reshape(self.batch_size, self.pomo_size,-1)
-                    self.simulated_ninf_flag = torch.where(self.simulated_ninf_flag > 0.5, float('-inf'),self.simulated_ninf_flag)
-                    self.simulated_ninf_flag = torch.where(self.simulated_ninf_flag != float('-inf'), 0., self.simulated_ninf_flag)
-        if simulate_and_val is not None: # use safety layer as simulated_ninf_flag and generate simulated_ninf_flag ground truth too
-            node_xy = self.node_xy
-            if self.problem in ["TSPTW"]:
-                node_tw_start = self.node_tw_start
-                node_tw_end = self.node_tw_end
-                # shape: (batch, problem)
-                feature = torch.cat((node_xy, node_tw_start[:, :, None], node_tw_end[:, :, None]), dim=2)
-                # shape: (batch, problem, 4)
-            elif self.problem in ['TSPDL']:
-                node_demand = self.node_demand
-                node_draft_limit = self.node_draft_limit
-                feature = torch.cat((node_xy, node_demand[:, :, None], node_draft_limit[:, :, None]), dim=2)
-            else:
-                raise NotImplementedError
-
-            with torch.no_grad():
-                simulation_safety_layer = simulate_and_val
-                simulation_safety_layer.eval()
-                self.simulated_ninf_flag_gt = self.simulated_ninf_flag.clone()
-                self.simulated_ninf_flag = simulation_safety_layer(
-                                    features=feature[:, None, :, :].repeat(1, self.pomo_size, 1, 1).reshape(self.batch_size * self.pomo_size, self.problem_size, -1),
-                                    unvisited=(self.visited_ninf_flag == float('-inf')).reshape(self.batch_size * self.pomo_size, -1),
-                                    current_node=self.current_node.reshape(self.batch_size * self.pomo_size, -1),
-                                    current=self.timestamps[:, :, -1].reshape(self.batch_size * self.pomo_size, -1),
-                                    no_sigmoid=False).reshape(self.batch_size, self.pomo_size,-1)
-                self.simulated_ninf_flag = torch.where(self.simulated_ninf_flag > 0.5, float('-inf'), self.simulated_ninf_flag)
-                self.simulated_ninf_flag = torch.where(self.simulated_ninf_flag != float('-inf'), 0., self.simulated_ninf_flag)
-
-        if safety_layer and self.selected_count < self.problem_size -1:
-            unvisited = torch.masked_select(torch.arange(self.problem_size).unsqueeze(0).unsqueeze(0).expand(self.batch_size, self.pomo_size,self.problem_size),
-                self.visited_ninf_flag != float('-inf')).reshape(self.batch_size*self.pomo_size, -1)
-            features = torch.cat([self.node_xy, self.node_tw_start[:,:,None], self.node_tw_end[:,:,None]], dim=-1)
-            features = features[:, None, :, :].repeat(1,self.pomo_size,1,1).reshape(self.batch_size*self.pomo_size, self.problem_size, -1)
-            current_node = self.current_node.reshape(self.batch_size*self.pomo_size, -1)
-            current = self.current_time.reshape(self.batch_size*self.pomo_size, -1)
-
-            predict_mask = safety_layer.predict_infsb_mask(features, unvisited, current_node, current)
-            predict_mask = predict_mask.reshape(self.batch_size, self.pomo_size, self.problem_size)
-            simulated_ninf_flag1 = torch.zeros((self.batch_size, self.pomo_size, self.problem_size))
-            simulated_ninf_flag1 = torch.where(predict_mask>0.5, float('-inf'), simulated_ninf_flag1)
+        # simulate the PIP masking
+        if generate_PI_mask and self.selected_count < self.problem_size -1:
+            self._calculate_PIP_mask(pip_step, selected)
 
         out_of_tw = next_arrival_time > self.node_tw_end[:, None, :].expand(-1, self.pomo_size, -1) + round_error_epsilon
         # shape: (batch, pomo, problem)
@@ -428,21 +293,15 @@ class TSPTWEnv:
             self.ninf_mask[out_of_tw] = float('-inf')
             all_infsb = ((self.ninf_mask == float('-inf')).all(dim=-1)).unsqueeze(-1).expand(-1, -1, self.problem_size)
             self.ninf_mask = torch.where(all_infsb, self.visited_ninf_flag, self.ninf_mask)
-        if simulation and self.selected_count < self.problem_size -1 and (not use_sl_mask): # use simulated mask once not using sl_mask
+        if generate_PI_mask and self.selected_count < self.problem_size -1 and (not use_predicted_PI_mask): # use PIP mask once not using mask from PIP-D
             self.ninf_mask = torch.where(self.simulated_ninf_flag==float('-inf'), float('-inf'), self.ninf_mask)
             all_infsb = ((self.ninf_mask == float('-inf')).all(dim=-1)).unsqueeze(-1).expand(-1, -1, self.problem_size)
             # all_infsb = ((self.simulated_ninf_flag==float('-inf')).all(dim=-1)).unsqueeze(-1).expand(-1,-1,self.problem_size)
-            self.ninf_mask = torch.where(all_infsb, self.visited_ninf_flag, self.ninf_mask)
-        if safety_layer and self.selected_count < self.problem_size -1:
-            self.ninf_mask = torch.where(simulated_ninf_flag1==float('-inf'), float('-inf'), self.ninf_mask)
-            all_infsb = ((self.ninf_mask==float('-inf')).all(dim=-1)).unsqueeze(-1).expand(-1,-1,self.problem_size)
             self.ninf_mask = torch.where(all_infsb, self.visited_ninf_flag, self.ninf_mask)
 
         # visited == 0 means not visited
         # out_of_tw_ninf_flag == -inf means already can not be visited bacause current_time + travel_time > tw_end
         newly_infeasible = (((self.visited_ninf_flag == 0).int() + (self.out_of_tw_ninf_flag == float('-inf')).int()) == 2).any(dim=2)
-        if infsb_level:
-            infsb_level_value = (((self.visited_ninf_flag == 0).int() + (self.out_of_tw_ninf_flag == float('-inf')).int()) == 2).sum(dim=2)
 
         self.infeasible = self.infeasible + newly_infeasible
         # once the infeasibility occurs, no matter which node is selected next, the route has already become infeasible
@@ -484,9 +343,6 @@ class TSPTWEnv:
             # print(">> Cause Infeasibility: Inlegal rate: {}".format(infeasible_rate))
         else:
             reward = None
-
-        if infsb_level:
-            return self.step_state, reward, done, [infeasible, infsb_level_value]
 
         return self.step_state, reward, done, infeasible
 
@@ -737,8 +593,201 @@ class TSPTWEnv:
 
         return aug_xy_data
 
-    def get_initial_solutions(self, strategy, k, max_dummy_size):
-        raise NotImplementedError #TODO: implement
+    def _calculate_PIP_mask(self, pip_step, selected):
+        '''
+        copy from https://github.com/jieyibi/PIP-constraint/blob/main/POMO%2BPIP/envs/TSPTWEnv.py [NeurIPS'24]
+        '''
+
+        round_error_epsilon = 0.00001
+        next_arrival_time = torch.max(self.current_time[:, :, None] + (self.current_coord[:, :, None, :] - self.node_xy[:, None, :, :].expand(-1, self.pomo_size, -1, -1)).norm(p=2, dim=-1) / self.speed,
+                                 self.node_tw_start[:, None, :].expand(-1, self.pomo_size, -1))
+        node_tw_end = self.node_tw_end[:, None, :].expand(-1, self.pomo_size, -1)
+
+        if pip_step == 0:
+            out_of_tw = next_arrival_time > node_tw_end + round_error_epsilon  # shape: (batch, pomo, problem)
+            self.simulated_ninf_flag = torch.zeros((self.batch_size, self.pomo_size, self.problem_size))
+            self.simulated_ninf_flag[out_of_tw] = float('-inf')
+        elif pip_step == 1:
+            unvisited = torch.masked_select(torch.arange(self.problem_size).unsqueeze(0).unsqueeze(0).expand(self.batch_size, self.pomo_size, self.problem_size),
+                self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
+            simulate_size = unvisited.size(-1)
+            two_step_unvisited = unvisited.unsqueeze(2).repeat(1, 1, simulate_size, 1)
+            diag_element = torch.eye(simulate_size).view(1, 1, simulate_size, simulate_size).repeat(self.batch_size, self.pomo_size, 1, 1)
+            two_step_idx = torch.masked_select(two_step_unvisited, diag_element == 0).reshape(self.batch_size,self.pomo_size,simulate_size, -1)
+
+            # add arrival_time of the first-step nodes
+            first_step_current_coord = self.node_xy.unsqueeze(1).repeat(1, self.pomo_size, 1, 1).gather(dim=2, index=unvisited.unsqueeze(3).expand(-1, -1, -1, 2))
+            # first_step_new_length = (first_step_current_coord - current_coord.unsqueeze(2).repeat(1,1,self.problem_size-self.selected_count,1)).norm(p=2, dim=-1)
+            # current_time = self.current_time.unsqueeze(-1).repeat(1, 1, simulate_size)
+            # first_step_tw_end = torch.masked_select(node_tw_end, self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
+            # node_tw_start = self.node_tw_start[:, None, :].expand(-1, self.pomo_size, -1)
+            # first_step_tw_start = torch.masked_select(node_tw_start, self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
+            # node_service_time = self.node_service_time[:, None, :].expand(-1, self.pomo_size, -1)
+            # first_step_node_service_time= torch.masked_select(node_service_time, self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
+            # first_step_current_time = torch.max(current_time + first_step_new_length / self.speed, first_step_tw_start) + first_step_node_service_time
+            first_step_arrival_time = next_arrival_time.gather(dim=-1, index=unvisited)
+
+            # add arrival_time of the second-step nodes
+            two_step_tw_end = node_tw_end.gather(dim=-1, index=unvisited)
+            two_step_tw_end = two_step_tw_end.unsqueeze(2).repeat(1, 1, simulate_size, 1)
+            two_step_tw_end = torch.masked_select(two_step_tw_end, diag_element == 0).reshape(self.batch_size, self.pomo_size, simulate_size, -1)
+
+            node_tw_start = self.node_tw_start[:, None, :].expand(-1, self.pomo_size, -1)
+            two_step_tw_start = node_tw_start.gather(dim=-1, index=unvisited)
+            two_step_tw_start = two_step_tw_start.unsqueeze(2).repeat(1, 1, simulate_size, 1)
+            two_step_tw_start = torch.masked_select(two_step_tw_start, diag_element == 0).reshape(self.batch_size, self.pomo_size, simulate_size, -1)
+
+            node_service_time = self.node_service_time[:, None, :].expand(-1, self.pomo_size, -1)
+            two_step_node_service_time = node_service_time.gather(dim=-1, index=unvisited)
+            two_step_node_service_time = two_step_node_service_time.unsqueeze(2).repeat(1, 1, simulate_size, 1)
+            two_step_node_service_time = torch.masked_select(two_step_node_service_time, diag_element == 0).reshape(self.batch_size, self.pomo_size, simulate_size, -1)
+
+            two_step_current_coord = first_step_current_coord.unsqueeze(2).repeat(1, 1, simulate_size, 1, 1)
+            two_step_current_coord = torch.masked_select(two_step_current_coord, diag_element.unsqueeze(-1).expand(-1, -1, -1, -1, 2) == 0).reshape(self.batch_size, self.pomo_size, simulate_size, -1, 2)
+            second_step_new_length = (two_step_current_coord - first_step_current_coord.unsqueeze(3).repeat(1, 1, 1, simulate_size - 1, 1)).norm(p=2, dim=-1)
+            first_step_arrival_time = first_step_arrival_time.unsqueeze(-1).repeat(1, 1, 1, simulate_size - 1)
+            second_step_arrival_time = torch.max(first_step_arrival_time + second_step_new_length / self.speed, two_step_tw_start) + two_step_node_service_time
+
+            # time window constraint
+            #   current_time: the end time of serving the current node
+            #   max(current_time + travel_time, tw_start) or current_time + travel_time <= tw_end
+            # feasibility judgement
+            infeasible_mark = (second_step_arrival_time > two_step_tw_end + round_error_epsilon)
+            selectable = (infeasible_mark == False).all(dim=-1)
+
+            # mark the selectable unvisited nodes
+            self.simulated_ninf_flag = torch.full((self.batch_size, self.pomo_size, self.problem_size), float('-inf'))
+            selected_indices = selectable.nonzero(as_tuple=False)
+            unvisited_indices = unvisited[selected_indices[:, 0], selected_indices[:, 1], selected_indices[:, 2]]
+            self.simulated_ninf_flag[selected_indices[:, 0], selected_indices[:, 1], unvisited_indices] = 0.
+
+        elif pip_step == 2:
+            if self.selected_count < self.problem_size - 2:
+                # unvisited nodes
+                unvisited = torch.masked_select(torch.arange(self.problem_size).unsqueeze(0).unsqueeze(0).expand(self.batch_size, self.pomo_size, self.problem_size), self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
+                unvisited_size = unvisited.size(-1)
+                # add arrival_time of the first-step nodes
+                first_step_current_coord = self.node_xy.unsqueeze(1).repeat(1, self.pomo_size, 1, 1).gather(dim=2, index=unvisited.unsqueeze(3).expand(-1, -1, -1, 2))
+                first_step_arrival_time = torch.masked_select(next_arrival_time, self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
+
+                # unvisited nodes in the second step
+                two_step_unvisited = unvisited.unsqueeze(2).repeat(1, 1, unvisited.size(2), 1)
+                diag_element = torch.diag_embed(torch.diagonal(two_step_unvisited, dim1=-2, dim2=-1))
+                two_step_idx = torch.masked_select(two_step_unvisited, diag_element == 0).reshape(self.batch_size, self.pomo_size, unvisited_size, -1)
+
+                # add arrival_time of the second-step nodes
+                two_step_tw_end = torch.masked_select(node_tw_end, self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
+                two_step_tw_end = two_step_tw_end.unsqueeze(2).repeat(1, 1, self.problem_size - self.selected_count, 1)
+                two_step_tw_end = torch.masked_select(two_step_tw_end, diag_element == 0).reshape(self.batch_size, self.pomo_size, unvisited_size, -1)
+
+                node_tw_start = self.node_tw_start[:, None, :].expand(-1, self.pomo_size, -1)
+                two_step_tw_start = torch.masked_select(node_tw_start, self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
+                two_step_tw_start = two_step_tw_start.unsqueeze(2).repeat(1, 1, self.problem_size - self.selected_count, 1)
+                two_step_tw_start = torch.masked_select(two_step_tw_start, diag_element == 0).reshape(self.batch_size, self.pomo_size, unvisited_size, -1)
+
+                # node_service_time = self.node_service_time[:, None, :].expand(-1, self.pomo_size, -1)
+                # two_step_node_service_time = torch.masked_select(node_service_time, self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
+                # two_step_node_service_time = two_step_node_service_time.unsqueeze(2).repeat(1, 1, self.problem_size - self.selected_count, 1)
+                # two_step_node_service_time = torch.masked_select(two_step_node_service_time, diag_element == 0).reshape(self.batch_size, self.pomo_size, self.problem_size - self.selected_count, -1)
+                two_step_node_service_time = 0.
+
+                two_step_current_coord = first_step_current_coord.unsqueeze(2).repeat(1, 1, unvisited_size, 1, 1)
+                two_step_current_coord = torch.masked_select(two_step_current_coord, diag_element.unsqueeze(-1).expand(-1, -1, -1, -1, 2) == 0).reshape(self.batch_size, self.pomo_size, unvisited_size, -1, 2)
+                second_step_new_length = (two_step_current_coord - first_step_current_coord.unsqueeze(3).repeat(1, 1, 1, unvisited_size - 1, 1)).norm(p=2, dim=-1)
+                first_step_arrival_time = first_step_arrival_time.unsqueeze(-1).repeat(1, 1, 1, unvisited_size - 1)
+                second_step_arrival_time = torch.max(first_step_arrival_time + second_step_new_length / self.speed, two_step_tw_start) + two_step_node_service_time
+
+                # Free the memory
+                del first_step_arrival_time, first_step_current_coord, diag_element, two_step_node_service_time, second_step_new_length
+
+                two_step_infeasible_mark = (second_step_arrival_time > two_step_tw_end + round_error_epsilon)
+                two_step_selectable = (two_step_infeasible_mark == False).all(dim=-1)
+
+                # unvisited nodes in the third step
+                three_step_unvisited = two_step_idx.unsqueeze(3).repeat(1, 1, 1, two_step_idx.size(-1), 1)
+                del two_step_idx
+                diag_element = torch.diag_embed(torch.diagonal(three_step_unvisited, dim1=-2, dim2=-1))
+                # three_step_idx = torch.masked_select(three_step_unvisited, diag_element == 0).reshape(self.batch_size, self.pomo_size, unvisited_size, unvisited_size - 1, -1)
+                # add arrival_time of the third-step nodes
+                three_step_tw_start = two_step_tw_start.unsqueeze(3).expand_as(three_step_unvisited)
+                del two_step_tw_start
+                three_step_tw_start = torch.masked_select(three_step_tw_start, diag_element == 0).reshape(self.batch_size, self.pomo_size, unvisited_size, unvisited_size - 1, -1)
+                three_step_tw_end = two_step_tw_end.unsqueeze(3).expand_as(three_step_unvisited)
+                del two_step_tw_end
+                three_step_tw_end = torch.masked_select(three_step_tw_end, diag_element == 0).reshape(self.batch_size, self.pomo_size, unvisited_size, unvisited_size - 1, -1)
+                three_step_node_service_time = 0.
+
+                three_step_current_coord = two_step_current_coord.unsqueeze(3).expand(-1, -1, -1, unvisited_size - 1, -1, -1)
+                three_step_current_coord = torch.masked_select(three_step_current_coord, diag_element.unsqueeze(-1).expand(-1, -1, -1, -1, -1, 2) == 0).reshape(self.batch_size, self.pomo_size, unvisited_size, unvisited_size - 1, -1, 2)
+                third_step_new_length = (three_step_current_coord - two_step_current_coord.unsqueeze(4).expand(-1, -1, -1, -1, unvisited_size - 2, -1)).norm(p=2,  dim=-1)
+                second_step_arrival_time = second_step_arrival_time.unsqueeze(-1).repeat(1, 1, 1, 1, unvisited_size - 2)
+                third_step_arrival_time = torch.max(second_step_arrival_time + third_step_new_length / self.speed, three_step_tw_start) + three_step_node_service_time
+                del second_step_arrival_time, two_step_current_coord, diag_element, three_step_node_service_time, third_step_new_length, three_step_tw_start
+
+                # time window constraint
+                #   current_time: the end time of serving the current node
+                #   max(current_time + travel_time, tw_start) or current_time + travel_time <= tw_end
+                # feasibility judgement
+                delta_t = self.env_params["random_delta_t"] * torch.rand(size=third_step_arrival_time.size())
+                third_step_arrival_time += delta_t
+                infeasible_mark = (third_step_arrival_time > three_step_tw_end + round_error_epsilon)
+                selectable = (infeasible_mark == False).all(dim=-1).any(dim=-1)
+                selectable = two_step_selectable & selectable  # Fixed the bug of ignoring the infeasible nodes in the last step
+
+                self.simulated_ninf_flag = torch.full((self.batch_size, self.pomo_size, self.problem_size), float('-inf'))
+                selected_indices = selectable.nonzero(as_tuple=False)
+                unvisited_indices = unvisited[selected_indices[:, 0], selected_indices[:, 1], selected_indices[:, 2]]
+                self.simulated_ninf_flag[selected_indices[:, 0], selected_indices[:, 1], unvisited_indices] = 0.
+            else:
+                pass
+        else:
+            raise NotImplementedError
+
+    def get_initial_solutions(self, strategy, k, max_dummy_size=0):
+        batch_size, problem_size, _ = self.node_xy.size()
+        if strategy == "random": # not guarantee feasibility (may exceed tw)
+            # start from 0
+            B_k = batch_size * k
+            # # random solution permutation
+            customer = torch.rand(B_k, problem_size-1).argsort(dim=1) + 1
+            solutions = torch.cat([torch.zeros((B_k, 1), dtype=torch.long), customer], dim=1)
+            # judge feasibility
+            context = self.preprocessing(sol2rec(solutions.unsqueeze(1)).squeeze(1))
+            non_feasible_cost_total = torch.clamp_min(context[1] - context[-1], 0.0).sum(-1)
+            self.infeasible = (non_feasible_cost_total > 0.0).view(batch_size, k)
+            solutions = solutions.view(batch_size, k, -1)
+            # customer_nodes = torch.arange(1, problem_size + 1)
+            # random_paths = torch.stack([customer_nodes[torch.randperm(problem_size)] for _ in range(B_k)])
+            # # initialize the solution
+            # current_solutions = torch.zeros((B_k, max_path_length), dtype=torch.long)
+            # current_solutions[:, 0] = 0  # 起点为depot
+            # current_lengths = torch.ones(B_k, dtype=torch.long)
+            # current_demands = torch.zeros(B_k)
+            # cum_demand = torch.zeros((batch_size, k, max_path_length), dtype=torch.float)
+            # # generate solutions
+            # for n in range(problem_size):
+            #     # select next nodes
+            #     next_nodes = random_paths[:, n]
+            #     # update route
+            #     current_solutions[torch.arange(B_k), current_lengths] = next_nodes
+            #     current_demands += depot_node_demand_expanded.view(-1, problem_size + 1)[torch.arange(B_k), next_nodes]
+            #     cum_demand.view(-1, max_path_length)[torch.arange(B_k), current_lengths] = current_demands
+            #     current_lengths += 1
+            #     # return depot if exceeds the capacity
+            #     over_capacity = current_demands > 1.0
+            #     if over_capacity.any():
+            #         current_solutions[over_capacity, current_lengths[over_capacity]] = 0
+            #         current_demands[over_capacity] = 0
+            #         current_lengths[over_capacity] += 1
+            #
+            # solutions = current_solutions.view(batch_size, k, max_path_length)
+        else:
+            raise NotImplementedError()
+
+        self.selected_node_list = solutions
+        # shape: (batch, k, solution)
+
+        return self._get_travel_distance()
 
     def preprocessing(self, rec):
         batch_size, seq_length = rec.size()
@@ -771,12 +820,12 @@ class TSPTWEnv:
 
         return (visited_time, arrival_time, last_arrival_time, tw_start, tw_end)
 
-    def check_feasibility(self, select_idx):
+    def check_feasibility(self, select_idx=None):
         raise NotImplementedError  # TODO: implement
         # assert (self.visited_ninf_flag == float('-inf')).all(), "not visiting all nodes!"
         # assert torch.gather(~self.infeasible, 1, select_idx).all(), "not valid tour!"
 
-    def get_costs(self, rec, get_context=False, check_full_feasibility=False, out_reward=False, penalty_factor=1.0, penalty_normalize=False):
+    def get_costs(self, rec, get_context=False, check_full_feasibility=False, out_reward=False, penalty_factor=1.0, penalty_normalize=False, seperate_obj_penalty=False, non_linear=None):
 
         k = rec.size(0) // self.node_xy.size(0)
         # check full feasibility if needed
@@ -800,9 +849,9 @@ class TSPTWEnv:
 
         # get context
         if get_context:
-            return cost, context, out_penalty, out_node_penalty
+            return cost, context, out_penalty.unsqueeze(0), out_node_penalty.unsqueeze(0)
         else:
-            return cost, out_penalty, out_node_penalty
+            return cost, out_penalty.unsqueeze(0), out_node_penalty.unsqueeze(0)
 
     def get_dynamic_feature(self, context, with_infsb_feature, tw_normalize=False):
         visited_time, arrival_time, last_arrival_time, tw_start, tw_end = context
@@ -836,7 +885,7 @@ class TSPTWEnv:
 
         return visited_time, None, feature
 
-    def improvement_step(self, rec, action, obj, feasible_history, t, weights=0, out_reward = False, penalty_factor=1., penalty_normalize=False, improvement_method = "kopt", insert_before=True):
+    def improvement_step(self, rec, action, obj, feasible_history, t, weights=0, out_reward = False, penalty_factor=1., penalty_normalize=False, improvement_method = "kopt", insert_before=True, epsilon=EPSILON_hardcoded, seperate_obj_penalty=False, non_linear=None, n2s_decoder=False):
 
         _, total_history = feasible_history.size()
         pre_bsf = obj[:, 1:].clone()  # batch_size, 3 (current, bsf, tsp_bsf)
@@ -854,7 +903,7 @@ class TSPTWEnv:
         # MDP step
         non_feasible_cost_total = torch.clamp_min(context[1] - context[-1], 0.0).sum(-1)
         feasible = non_feasible_cost_total <= 0.0
-        soft_infeasible = (non_feasible_cost_total <= self.epsilon) & (non_feasible_cost_total > 0.)
+        soft_infeasible = (non_feasible_cost_total <= epsilon) & (non_feasible_cost_total > 0.)
 
         now_obj = pre_bsf.clone()
         if not out_reward:
@@ -862,44 +911,64 @@ class TSPTWEnv:
             now_obj[feasible, 0] = next_obj[feasible].clone()
         else:
             # update all obj, obj = cost + penalty
-            now_obj[:, 0] = next_obj.clone()
+            if non_linear is None:
+                now_obj[:, 0] = next_obj.clone()
+            elif non_linear in ["fixed_epsilon", "decayed_epsilon"]: # only have reward when penalty <= epsilon
+                now_obj[soft_infeasible, 0] = next_obj[soft_infeasible].clone()
+            else:
+                raise NotImplementedError
         # only update epsilon feasible obj
         now_obj[soft_infeasible, 1] = next_obj[soft_infeasible].clone()
         now_bsf = torch.min(pre_bsf, now_obj)
         rewards = (pre_bsf - now_bsf)  # bs,2 (feasible_reward, epsilon-feasible_reward)
 
         # feasible history step
-        feasible_history[:, 1:] = feasible_history[:, :total_history - 1].clone()
-        feasible_history[:, 0] = feasible.clone()
+        if n2s_decoder: # calculate the removal record
+            # todo: not carefully check yet but probably correct
+            info, reg = None, torch.zeros((action.size(0), 1))
+            assert not self.env_params["with_regular"], "n2s decoder does not support regularization reward."
+            feasible_history[:, 1:] = feasible_history[:, :total_history - 1].clone()
+            action_removal= torch.zeros_like(feasible_history[:,0])
+            action_removal[torch.arange(action.size(0)).unsqueeze(1), action[:, :1]] = 1.
+            feasible_history[:, 0] = action_removal.clone()
+            context2 = torch.cat(
+            (
+                feasible_history, # last three removal
+                feasible_history.mean(1, keepdims=True) if t > (total_history-2) else feasible_history[:,:(t+1)].mean(1, keepdims=True), # note: slightly different from N2S due to shorter improvement steps; before/after?
+            ),1 )  # (batch_size, 4, solution_size)
+        else:
+            feasible_history[:, 1:] = feasible_history[:, :total_history - 1].clone()
+            feasible_history[:, 0] = feasible.clone()
 
-        # compute the ES features
-        feasible_history_pre = feasible_history[:, 1:]
-        feasible_history_post = feasible_history[:, :total_history - 1]
-        f_to_if = ((feasible_history_pre == True) & (feasible_history_post == False)).sum(1, True) / (total_history - 1)
-        f_to_f = ((feasible_history_pre == True) & (feasible_history_post == True)).sum(1, True) / (total_history - 1)
-        if_to_f = ((feasible_history_pre == False) & (feasible_history_post == True)).sum(1, True) / (total_history - 1)
-        if_to_if = ((feasible_history_pre == False) & (feasible_history_post == False)).sum(1, True) / (total_history - 1)
-        f_to_if_2 = f_to_if / (f_to_if + f_to_f + 1e-5)
-        f_to_f_2 = f_to_f / (f_to_if + f_to_f + 1e-5)
-        if_to_f_2 = if_to_f / (if_to_f + if_to_if + 1e-5)
-        if_to_if_2 = if_to_if / (if_to_f + if_to_if + 1e-5)
+            # compute the ES features
+            feasible_history_pre = feasible_history[:, 1:]
+            feasible_history_post = feasible_history[:, :total_history - 1]
+            f_to_if = ((feasible_history_pre == True) & (feasible_history_post == False)).sum(1, True) / (total_history - 1)
+            f_to_f = ((feasible_history_pre == True) & (feasible_history_post == True)).sum(1, True) / (total_history - 1)
+            if_to_f = ((feasible_history_pre == False) & (feasible_history_post == True)).sum(1, True) / (total_history - 1)
+            if_to_if = ((feasible_history_pre == False) & (feasible_history_post == False)).sum(1, True) / (total_history - 1)
+            f_to_if_2 = f_to_if / (f_to_if + f_to_f + 1e-5)
+            f_to_f_2 = f_to_f / (f_to_if + f_to_f + 1e-5)
+            if_to_f_2 = if_to_f / (if_to_f + if_to_if + 1e-5)
+            if_to_if_2 = if_to_if / (if_to_f + if_to_if + 1e-5)
 
-        # update info to decoder
-        active = (t >= (total_history - 2))
-        context2 = torch.cat((
-            (if_to_if * active),
-            (if_to_if_2 * active),
-            (f_to_f * active),
-            (f_to_f_2 * active),
-            (if_to_f * active),
-            (if_to_f_2 * active),
-            (f_to_if * active),
-            (f_to_if_2 * active),
-            feasible.unsqueeze(-1).float(),
-        ), -1)  # 9 ES features
+            # update info to decoder
+            active = (t >= (total_history - 2))
+            context2 = torch.cat((
+                (if_to_if * active),
+                (if_to_if_2 * active),
+                (f_to_f * active),
+                (f_to_f_2 * active),
+                (if_to_f * active),
+                (if_to_f_2 * active),
+                (f_to_if * active),
+                (f_to_if_2 * active),
+                feasible.unsqueeze(-1).float(),
+            ), -1)  # 9 ES features
 
-        # update regulation
-        reg = self.f(f_to_f_2) + self.f(if_to_if_2)
+            info = (if_to_if, if_to_f, f_to_if, f_to_f, if_to_if_2, if_to_f_2, f_to_if_2, f_to_f_2)
+            # update regulation
+            reg = self.f(f_to_f_2) + self.f(if_to_if_2)
 
         reward = torch.cat((rewards[:, :1],  # reward
                             -1 * reg * weights * 0.05 * self.env_params["with_regular"],  # regulation, alpha = 0.05
@@ -912,7 +981,7 @@ class TSPTWEnv:
                feasible_history,
                context,
                context2,
-               (if_to_if, if_to_f, f_to_if, f_to_f, if_to_if_2, if_to_f_2, f_to_if_2, f_to_f_2),
+               info,
                out_penalty,
                out_node_penalty
                )

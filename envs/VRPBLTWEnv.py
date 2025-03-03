@@ -415,7 +415,7 @@ class VRPBLTWEnv:
         # shape: (batch, pomo)
         self.finished = self.finished + newly_finished
         # shape: (batch, pomo)
-
+        # print((self.visited_ninf_flag==float('-inf')).float().sum(-1).mean())
         # do not mask depot for finished episode.
         self.ninf_mask[:, :, 0][self.finished] = 0
 
@@ -581,6 +581,7 @@ class VRPBLTWEnv:
 
     def get_initial_solutions(self, strategy, k, max_dummy_size):
         raise NotImplementedError
+
     def preprocessing(self, rec):
         batch_size, seq_length = rec.size()
         assert seq_length < 1000

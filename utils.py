@@ -451,6 +451,7 @@ def get_solution_with_dummy_depot(solution, problem_size):
 
 def remove_dummy_depot_from_solution(solution, problem_size):
     # solution.size: (batch, pomo, solution)
+    if solution.size(-1) == problem_size: return solution
     batch_size, pomo_size, _ = solution.size()
     dummy_size = solution.size(-1) - problem_size
     solution = solution.clone()
@@ -610,6 +611,7 @@ class metric_logger:
             "out": AverageMeter(),
             "out_nodes": AverageMeter(),
         }
+        self.improve_metrics["out_ratio"] = AverageMeter()
         if problem in ["OVRPBLTW", "OVRPLTW", "VRPBLTW"]:
             self.improve_metrics["dlout"] = AverageMeter()
             self.improve_metrics["dlout_nodes"] = AverageMeter()
@@ -624,7 +626,6 @@ class metric_logger:
             self.improve_metrics["capacity_out_ratio"] = AverageMeter()
             self.improve_metrics["backhaul_out_ratio"] = AverageMeter()
             self.improve_metrics["dlout_ratio"] = AverageMeter()
-            self.improve_metrics["out_ratio"] = AverageMeter()
 
             self.improve_metrics["cons_tw_out_ratio"] = AverageMeter()
             self.improve_metrics["cons_capacity_out_ratio"] = AverageMeter()
@@ -659,6 +660,16 @@ class val_metric_logger:
             "no_aug_out_nodes": torch.zeros(0).to(trainer.device),
             "aug_out": torch.zeros(0).to(trainer.device),
             "aug_out_nodes": torch.zeros(0).to(trainer.device),
+            "no_aug_gap_list": 0.0,
+            "aug_gap_list": 0.0,
+        }
+        self.reimprove_metrics = {
+            "no_aug_score": torch.zeros(0).to(trainer.device),
+            "aug_score": torch.zeros(0).to(trainer.device),
+            "sol_infeasible_rate": AverageMeter(),
+            "ins_infeasible_rate": AverageMeter(),
+            "no_aug_feasible": torch.zeros(0).to(trainer.device),
+            "aug_feasible": torch.zeros(0).to(trainer.device),
             "no_aug_gap_list": 0.0,
             "aug_gap_list": 0.0,
         }
@@ -720,6 +731,9 @@ class val_metric_logger:
     def _improve_tensor_update(self, key, value):
         self.improve_metrics[key] = torch.cat((self.improve_metrics[key], value), dim=0)
 
+    def _reimprove_tensor_update(self, key, value):
+        self.reimprove_metrics[key] = torch.cat((self.reimprove_metrics[key], value), dim=0)
+
     def _reconstruct_tensor_update(self, key, value):
         self.reconstruct_metrics[key] = torch.cat((self.reconstruct_metrics[key], value), dim=0)
 
@@ -745,7 +759,7 @@ class val_metric_logger:
         self.construct_metrics["sol_infeasible_rate_list"] = round(sol_infeasible_rate.avg.item() *100, 3)
         self.construct_metrics["ins_infeasible_rate_list"] = round(ins_infeasible_rate.avg.item() *100, 3)
         # improvement
-        if trainer.trainer_params["improve_steps"] > 0.:
+        if trainer.trainer_params["validation_improve_steps"] > 0.:
             no_aug_score = self.improve_metrics["no_aug_score"]
             no_aug_feasible = self.improve_metrics["no_aug_feasible"]
             aug_score = self.improve_metrics["aug_score"]
@@ -777,6 +791,23 @@ class val_metric_logger:
                 ins_infeasible_rate = self.reconstruct_metrics["ins_infeasible_rate"]
                 self.reconstruct_metrics["sol_infeasible_rate_list"] = round(sol_infeasible_rate.avg.item() * 100, 3)
                 self.reconstruct_metrics["ins_infeasible_rate_list"] = round(ins_infeasible_rate.avg.item() * 100, 3)
+        # reimprove
+        if trainer.trainer_params["val_reconstruct_times"] > 1.:
+            no_aug_score = self.reimprove_metrics["no_aug_score"]
+            no_aug_feasible = self.reimprove_metrics["no_aug_feasible"]
+            aug_score = self.reimprove_metrics["aug_score"]
+            aug_feasible = self.reimprove_metrics["aug_feasible"]
+            if trainer.trainer_params["fsb_dist_only"]:
+                self.reimprove_metrics["no_aug_score_list"] = round(no_aug_score[no_aug_feasible.bool()].mean().item(), 4)
+                self.reimprove_metrics["aug_score_list"] = round(aug_score[aug_feasible.bool()].mean().item(), 4)
+            else:
+                self.reimprove_metrics["no_aug_score_list"] = round(no_aug_score.mean().item(), 4)
+                self.reimprove_metrics["aug_score_list"] = round(aug_score.mean().item(), 4)
+
+            sol_infeasible_rate = self.reimprove_metrics["sol_infeasible_rate"]
+            ins_infeasible_rate = self.reimprove_metrics["ins_infeasible_rate"]
+            self.reimprove_metrics["sol_infeasible_rate_list"] = round(sol_infeasible_rate.avg.item() * 100, 3)
+            self.reimprove_metrics["ins_infeasible_rate_list"] = round(ins_infeasible_rate.avg.item() * 100, 3)
         # reconstruction
         if trainer.tester_params["aux_mask"]:
             no_aug_score = self.reconstruct_masked_metrics["no_aug_score"]
@@ -824,6 +855,25 @@ class val_metric_logger:
 
             self.improve_metrics["no_aug_gap_list"] = round(gap.mean().item(), 4)
             self.improve_metrics["aug_gap_list"] = round(aug_gap.mean().item(), 4)
+
+            # reimprove
+            if trainer.trainer_params["val_reconstruct_times"] > 1.:
+                no_aug_score = self.reimprove_metrics["no_aug_score"]
+                no_aug_feasible = self.reimprove_metrics["no_aug_feasible"]
+                aug_score = self.reimprove_metrics["aug_score"]
+                aug_feasible = self.reimprove_metrics["aug_feasible"]
+                if trainer.trainer_params["fsb_dist_only"]:
+                    gap = (no_aug_score[no_aug_feasible.bool()] - opt_sol[no_aug_feasible.bool()]) / opt_sol[
+                        no_aug_feasible.bool()] * 100
+                    aug_gap = (aug_score[aug_feasible.bool()] - opt_sol[aug_feasible.bool()]) / opt_sol[
+                        aug_feasible.bool()] * 100
+                else:
+                    gap = (no_aug_score - opt_sol) / opt_sol * 100
+                    aug_gap = (aug_score - opt_sol) / opt_sol * 100
+
+                self.reimprove_metrics["no_aug_gap_list"] = round(gap.mean().item(), 4)
+                self.reimprove_metrics["aug_gap_list"] = round(aug_gap.mean().item(), 4)
+            # reconstruct
             if trainer.trainer_params["reconstruct"]:
                 no_aug_score = self.reconstruct_metrics["no_aug_score"]
                 no_aug_feasible = self.reconstruct_metrics["no_aug_feasible"]
@@ -1035,3 +1085,20 @@ def select_data_by_index(data, index):
     # Use torch.gather to select elements along the first dimension (dim=0)
     selected_data = torch.gather(data, 0, expanded_index)
     return selected_data
+
+def find_optimal_coe(loss1, loss2, tolerance=2):
+    delta_x = (torch.log10(torch.abs(loss1 / loss2)).floor())
+    min_x = (delta_x - tolerance).int()
+    max_x = (delta_x + tolerance).int()
+    best_x = None
+    smallest_difference = float('inf')
+    for x in range(min_x, max_x + 1):
+        scaled_loss2 = 10 ** x * loss2
+        if torch.abs(loss1) > torch.abs(scaled_loss2):  # ensure loss1 > 10^x * loss2
+            log_loss1 = torch.log10(torch.abs(loss1))
+            log_scaled_loss2 = torch.log10(torch.abs(scaled_loss2))
+            difference = torch.abs(log_loss1 - log_scaled_loss2)
+            if difference < smallest_difference:
+                smallest_difference = difference
+                best_x = x
+    return best_x

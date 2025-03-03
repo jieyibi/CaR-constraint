@@ -12,6 +12,7 @@ EPSILON = {
     100: 1.0,
     200: 1.429
 }
+EPSILON_hardcoded = 0.625
 
 @dataclass
 class Reset_State:
@@ -173,7 +174,6 @@ class CVRPEnv:
         self.step_state.START_NODE = torch.arange(start=1, end=self.pomo_size+1)[None, :].expand(self.batch_size, -1).to(self.device)
         self.step_state.PROBLEM = self.problem
 
-
     def reset(self):
         self.selected_count = 0
         self.current_node = None
@@ -223,7 +223,6 @@ class CVRPEnv:
         reward = None
         done = False
         return self.step_state, reward, done
-
 
     def step(self, selected, out_reward = False, soft_constrained = False, backhaul_mask = None, penalty_normalize=True):
         # selected.shape: (batch, pomo)
@@ -300,9 +299,11 @@ class CVRPEnv:
         self.step_state.length = self.length
         self.step_state.current_coord = self.current_coord
 
+        infeasible = 0.0
         # returning values
         done = self.finished.all()
         if done:
+            self.dummy_size = self.selected_node_list.size(-1) - self.problem_size
             reward = -self._get_travel_distance()  # note the minus sign!
             total_out_of_capacity_reward = -self.out_of_capacity_list.sum(dim=-1)
             out_of_capacity_nodes_reward = -torch.where(self.out_of_capacity_list > 0, torch.ones_like(self.out_of_capacity_list), self.out_of_capacity_list).sum(-1).int()
@@ -348,7 +349,6 @@ class CVRPEnv:
             pickle.dump(list(zip(*dataset)), f, pickle.HIGHEST_PROTOCOL)
         print("Save CVRP-LV dataset to {}".format(path))
 
-
     def load_dataset(self, path, offset=0, num_samples=1000, disable_print=True):
         assert os.path.splitext(path)[1] == ".pkl", "Unsupported file type (.pkl needed)."
         with open(path, 'rb') as f:
@@ -360,7 +360,6 @@ class CVRPEnv:
         node_demand = node_demand / capacity.view(-1, 1)
         data = (depot_xy, node_xy, node_demand)
         return data
-
 
     def get_random_problems(self, batch_size, problem_size, normalized=True):
         depot_xy = torch.rand(size=(batch_size, 1, 2))  # (batch, 1, 2)
@@ -529,7 +528,7 @@ class CVRPEnv:
 
         return self._get_travel_distance()
 
-    def improvement_step(self, rec, action, obj, feasible_history, t, weights=0, out_reward = False, penalty_factor=1., improvement_method = "kopt", insert_before=True):
+    def improvement_step(self, rec, action, obj, feasible_history, t, weights=0, out_reward = False, penalty_factor=1., improvement_method = "kopt", insert_before=True, epsilon=EPSILON_hardcoded, seperate_obj_penalty=False, non_linear=None, n2s_decoder=False, penalty_normalize=False):
 
         _, total_history = feasible_history.size()
         pre_bsf = obj[:, 1:].clone()  # batch_size, 3 (current, bsf, tsp_bsf)
@@ -550,9 +549,9 @@ class CVRPEnv:
         #     next_obj = next_obj + penalty_factor * (out_node_penalty + out_penalty)
 
         # MDP step
-        non_feasible_cost_total = out_penalty
+        non_feasible_cost_total = out_penalty.sum(0)
         feasible = non_feasible_cost_total <= 0.0
-        soft_infeasible = (non_feasible_cost_total <= self.epsilon) & (non_feasible_cost_total > 0.)
+        soft_infeasible = (non_feasible_cost_total <= epsilon) & (non_feasible_cost_total > 0.)
 
         now_obj = pre_bsf.clone()
         if not out_reward:
@@ -560,44 +559,65 @@ class CVRPEnv:
             now_obj[feasible, 0] = next_obj[feasible].clone()
         else:
             # update all obj, obj = cost + penalty
-            now_obj[:, 0] = next_obj.clone()
+            if non_linear is None:
+                now_obj[:, 0] = next_obj.clone()
+            elif non_linear in ["fixed_epsilon", "decayed_epsilon"]: # only have reward when penalty <= epsilon
+                now_obj[soft_infeasible, 0] = next_obj[soft_infeasible].clone()
+            else:
+                raise NotImplementedError
+
         # only update epsilon feasible obj
         now_obj[soft_infeasible, 1] = next_obj[soft_infeasible].clone()
         now_bsf = torch.min(pre_bsf, now_obj)
         rewards = (pre_bsf - now_bsf)  # bs,2 (feasible_reward, epsilon-feasible_reward)
 
         # feasible history step
-        feasible_history[:, 1:] = feasible_history[:, :total_history - 1].clone()
-        feasible_history[:, 0] = feasible.clone()
+        if n2s_decoder: # calculate the removal record
+            # todo: not carefully check yet but probably correct
+            info, reg = None, torch.zeros((action.size(0), 1))
+            assert not self.env_params["with_regular"], "n2s decoder does not support regularization reward."
+            feasible_history[:, 1:] = feasible_history[:, :total_history - 1].clone()
+            action_removal= torch.zeros_like(feasible_history[:,0])
+            action_removal[torch.arange(action.size(0)).unsqueeze(1), action[:, :1]] = 1.
+            feasible_history[:, 0] = action_removal.clone()
+            context2 = torch.cat(
+            (
+                feasible_history, # last three removal
+                feasible_history.mean(1, keepdims=True) if t > (total_history-2) else feasible_history[:,:(t+1)].mean(1, keepdims=True), # note: slightly different from N2S due to shorter improvement steps; before/after?
+            ),1 )  # (batch_size, 4, solution_size)
+        else:
+            feasible_history[:, 1:] = feasible_history[:, :total_history - 1].clone()
+            feasible_history[:, 0] = feasible.clone()
 
-        # compute the ES features
-        feasible_history_pre = feasible_history[:, 1:]
-        feasible_history_post = feasible_history[:, :total_history - 1]
-        f_to_if = ((feasible_history_pre == True) & (feasible_history_post == False)).sum(1, True) / (total_history - 1)
-        f_to_f = ((feasible_history_pre == True) & (feasible_history_post == True)).sum(1, True) / (total_history - 1)
-        if_to_f = ((feasible_history_pre == False) & (feasible_history_post == True)).sum(1, True) / (total_history - 1)
-        if_to_if = ((feasible_history_pre == False) & (feasible_history_post == False)).sum(1, True) / (total_history - 1)
-        f_to_if_2 = f_to_if / (f_to_if + f_to_f + 1e-5)
-        f_to_f_2 = f_to_f / (f_to_if + f_to_f + 1e-5)
-        if_to_f_2 = if_to_f / (if_to_f + if_to_if + 1e-5)
-        if_to_if_2 = if_to_if / (if_to_f + if_to_if + 1e-5)
+            # compute the ES features
+            feasible_history_pre = feasible_history[:, 1:]
+            feasible_history_post = feasible_history[:, :total_history - 1]
+            f_to_if = ((feasible_history_pre == True) & (feasible_history_post == False)).sum(1, True) / (total_history - 1)
+            f_to_f = ((feasible_history_pre == True) & (feasible_history_post == True)).sum(1, True) / (total_history - 1)
+            if_to_f = ((feasible_history_pre == False) & (feasible_history_post == True)).sum(1, True) / (total_history - 1)
+            if_to_if = ((feasible_history_pre == False) & (feasible_history_post == False)).sum(1, True) / (total_history - 1)
+            f_to_if_2 = f_to_if / (f_to_if + f_to_f + 1e-5)
+            f_to_f_2 = f_to_f / (f_to_if + f_to_f + 1e-5)
+            if_to_f_2 = if_to_f / (if_to_f + if_to_if + 1e-5)
+            if_to_if_2 = if_to_if / (if_to_f + if_to_if + 1e-5)
 
-        # update info to decoder
-        active = (t >= (total_history - 2))
-        context2 = torch.cat((
-            (if_to_if * active),
-            (if_to_if_2 * active),
-            (f_to_f * active),
-            (f_to_f_2 * active),
-            (if_to_f * active),
-            (if_to_f_2 * active),
-            (f_to_if * active),
-            (f_to_if_2 * active),
-            feasible.unsqueeze(-1).float(),
-        ), -1)  # 9 ES features
+            # update info to decoder
+            active = (t >= (total_history - 2))
+            context2 = torch.cat((
+                (if_to_if * active),
+                (if_to_if_2 * active),
+                (f_to_f * active),
+                (f_to_f_2 * active),
+                (if_to_f * active),
+                (if_to_f_2 * active),
+                (f_to_if * active),
+                (f_to_if_2 * active),
+                feasible.unsqueeze(-1).float(),
+            ), -1)  # 9 ES features
 
-        # update regulation
-        reg = self.f(f_to_f_2) + self.f(if_to_if_2)
+            info = (if_to_if, if_to_f, f_to_if, f_to_f, if_to_if_2, if_to_f_2, f_to_if_2, f_to_f_2)
+            # update regulation
+            reg = self.f(f_to_f_2) + self.f(if_to_if_2)
 
         reward = torch.cat((rewards[:, :1],  # reward
                             -1 * reg * weights * 0.05 * self.env_params["with_regular"],  # regulation, alpha = 0.05
@@ -610,7 +630,9 @@ class CVRPEnv:
                feasible_history,
                context,
                context2,
-               (if_to_if, if_to_f, f_to_if, f_to_f, if_to_if_2, if_to_f_2, f_to_if_2, f_to_f_2)
+               info,
+               out_penalty,
+               out_node_penalty
                )
 
         return out
@@ -770,7 +792,7 @@ class CVRPEnv:
             assert (partial_sum_wrt_route_plan <= 1 + 1e-5).all(), (
             "not satisfying capacity constraint", partial_sum_wrt_route_plan, partial_sum_wrt_route_plan.max())
 
-    def get_costs(self, rec, get_context=False, check_full_feasibility=False, out_reward=False, penalty_factor=1.0):
+    def get_costs(self, rec, get_context=False, check_full_feasibility=False, out_reward=False, penalty_factor=1.0, penalty_normalize=False, seperate_obj_penalty=False, non_linear=None):
 
         # preprocess: make it with dummy depot
         pomo_size = rec.size(0) // self.batch_size
@@ -805,9 +827,9 @@ class CVRPEnv:
 
         # get CVRP context
         if get_context:
-            return cost, context, out_penalty, out_node_penalty
+            return cost, context, out_penalty.unsqueeze(0), out_node_penalty.unsqueeze(0)
         else:
-            return cost, out_penalty, out_node_penalty
+            return cost, out_penalty.unsqueeze(0), out_node_penalty.unsqueeze(0)
 
     def get_dynamic_feature(self, context, with_infsb_feature, tw_normalize=False):
 
