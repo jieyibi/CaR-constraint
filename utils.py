@@ -16,6 +16,7 @@ import shutil
 import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, Subset
 import logging
+import pandas as pd
 
 class AverageMeter:
     def __init__(self):
@@ -552,7 +553,7 @@ def dummify(input, dummy_size):
     return output
 
 class metric_logger:
-    def __init__(self, problem="CVRP", dual_decoder=False):
+    def __init__(self, problem="CVRP", pip_decoder=False):
         self.dummy_size = AverageMeter()
         self.coefficient = AverageMeter()
         self.sigma1 = AverageMeter()
@@ -642,13 +643,23 @@ class metric_logger:
             self.reconstruct_metrics["dlout_nodes"] = AverageMeter()
             self.reconstruct_metrics["capacity_out"] = AverageMeter()
             self.reconstruct_metrics["capacity_out_nodes"] = AverageMeter()
-        if dual_decoder:
-            self.construct_metrics["loss1"] = AverageMeter()
-            self.construct_metrics["loss2"] = AverageMeter()
+        if pip_decoder:
+            self.construct_metrics["sl_loss"] = AverageMeter()
+            self.construct_metrics["accuracy"] = AverageMeter()
+            self.construct_metrics["infsb_accuracy"] = AverageMeter()
+            self.construct_metrics["fsb_accuracy"] = AverageMeter()
+
+    def _reset_pip_d_metrics(self):
+        self.construct_metrics["sl_loss"] = AverageMeter()
+        self.construct_metrics["accuracy"] = AverageMeter()
+        self.construct_metrics["infsb_accuracy"] = AverageMeter()
+        self.construct_metrics["fsb_accuracy"] = AverageMeter()
 
 
 class val_metric_logger:
     def __init__(self, trainer):
+        self.best_reward = None
+        self.best_reward_all = self.best_feasible_all = self.best_solution_all = None
         self.improve_metrics = {
             "no_aug_score": torch.zeros(0).to(trainer.device),
             "aug_score": torch.zeros(0).to(trainer.device),
@@ -741,6 +752,26 @@ class val_metric_logger:
         self.reconstruct_masked_metrics[key] = torch.cat((self.reconstruct_masked_metrics[key], value), dim=0)
 
     def _log_output(self, trainer):
+
+
+        if trainer.tester_params["best_solution_path"] is not None:
+            # if trainer.tester_params["refinement_history_path"] is not None:
+            file_path = trainer.tester_params["refinement_history_path"]
+            torch.save(self.reward_history, "rebut/" + file_path + "_reward.pt")
+            print(self.reward_history.size())
+            torch.save(self.feasible_bsf_history, "rebut/" + file_path + "_fsb.pt" )
+            print(self.feasible_bsf_history.size())
+            torch.save(self.solution_history, "rebut/" + file_path + "_solution.pt")
+            print(self.solution_history.size())
+
+            all_pack = [
+                (r.item(), bool(f), s.tolist())
+                for r, f, s in zip(self.best_reward_all, self.best_feasible_all, self.best_solution_all)
+            ]
+            with open(trainer.tester_params["best_solution_path"], 'wb') as f:
+                pickle.dump(all_pack, f, pickle.HIGHEST_PROTOCOL)
+            print(f"Best solution saved to {trainer.tester_params['best_solution_path']}, size: {self.best_solution_all.size()}")
+
         # construction
         no_aug_score = self.construct_metrics["no_aug_score"]
         no_aug_feasible = self.construct_metrics["no_aug_feasible"]
@@ -838,6 +869,10 @@ class val_metric_logger:
         else:
             gap = (no_aug_score - opt_sol) / opt_sol * 100
             aug_gap = (aug_score - opt_sol) / opt_sol * 100
+        torch.save(aug_score, "pomo_aug_score.pt")
+        torch.save(aug_feasible, "pomo_aug_feasible.pt")
+        torch.save(no_aug_score, "pomo_no_aug_score.pt")
+        torch.save(no_aug_feasible, "pomo_no_aug_feasible.pt")
         self.construct_metrics["no_aug_gap_list"] = round(gap.mean().item(), 4)
         self.construct_metrics["aug_gap_list"] = round(aug_gap.mean().item(), 4)
         # improvement
@@ -854,7 +889,9 @@ class val_metric_logger:
                 aug_gap = (aug_score - opt_sol) / opt_sol * 100
 
             self.improve_metrics["no_aug_gap_list"] = round(gap.mean().item(), 4)
+            # self.improve_metrics["no_aug_gap_list"] = aug_gap.std(unbiased=True)#/ aug_gap.sqrt().size(0)
             self.improve_metrics["aug_gap_list"] = round(aug_gap.mean().item(), 4)
+
 
             # reimprove
             if trainer.trainer_params["val_reconstruct_times"] > 1.:
@@ -901,6 +938,18 @@ class val_metric_logger:
                 aug_gap = (aug_score - opt_sol) / opt_sol * 100
             self.reconstruct_masked_metrics["no_aug_gap_list"] = round(gap.mean().item(), 4)
             self.reconstruct_masked_metrics["aug_gap_list"] = round(aug_gap.mean().item(), 4)
+
+        if trainer.tester_params["best_solution_path"] is not None:
+            df = pd.DataFrame(np.array(aug_gap.tolist()))
+            excel_file = trainer.tester_params["best_solution_path"] + "_gap.xlsx"
+            # excel_file = "pip_gap.xlsx"
+            df.to_excel(excel_file, index=False, header=False)
+            print(excel_file)
+            df = pd.DataFrame(np.array(aug_feasible.float().tolist()))
+            excel_file = trainer.tester_params["best_solution_path"] + "_fsb.xlsx"
+            # excel_file = "pip_fsb.xlsx"
+            df.to_excel(excel_file, index=False, header=False)
+            print(excel_file)
 
 
 class ValidationDataset(Dataset):
@@ -1102,3 +1151,89 @@ def find_optimal_coe(loss1, loss2, tolerance=2):
                 smallest_difference = difference
                 best_x = x
     return best_x
+
+import torch
+import torch.nn.functional as F
+
+def pad_and_cat_dim(tensor_list):
+    """
+    Pads tensors along the last dimension (dim=2) to the same length,
+    then concatenates them along dim=1.
+
+    Args:
+        tensor_list (List[Tensor]): list of tensors with shape (A, B_i, C_i)
+
+    Returns:
+        Tensor: shape (A, sum(B_i), max_C)
+    """
+    max_len = max(t.size(-1) for t in tensor_list)
+
+    padded_list = [
+        F.pad(t, pad=(0, max_len - t.size(-1)))  # pad last dim: (pad_right, pad_left)
+        for t in tensor_list
+    ]
+
+    return torch.cat(padded_list)
+
+
+def cal_best_aug_batch(dist, penalty, feasible, solution):
+
+    criterion = dist.masked_fill(~feasible, float("inf"))
+    penalty = penalty.masked_fill(feasible, float("inf"))
+
+    best_reward, best_index = criterion.min(0)
+    no_feasible = torch.isinf(best_reward)
+    if no_feasible.any():  #
+        fallback_best, fallback_index = penalty[:, no_feasible].min(0)
+        best_reward[no_feasible] = fallback_best
+        best_index[no_feasible] = fallback_index
+
+    solution = solution.permute(1, 0, 2)  # (batch, augs, solution)
+    best_solution = torch.gather(solution, dim=1, index=best_index.view(-1, 1, 1).expand(-1, 1, solution.size(-1))).view(solution.size(0), -1)
+
+    return best_reward, ~no_feasible, best_solution
+
+def reshape_aug_view(x, batch_size, aug_factor, pomo_size):
+    return x.view(aug_factor, batch_size // aug_factor, pomo_size).permute(1, 0, 2).reshape(batch_size // aug_factor, -1)
+
+def reshape_aug_solution(x, batch_size, aug_factor, pomo_size):
+    return x.view(aug_factor, batch_size // aug_factor, pomo_size, -1).permute(1, 0, 2, 3).reshape(batch_size // aug_factor, -1, x.size(-1))
+
+
+def update_best_records(
+    best_reward: torch.Tensor,
+    best_feasible: torch.Tensor,
+    best_solution: torch.Tensor,
+    new_reward: torch.Tensor,
+    new_feasible: torch.Tensor,
+    new_solution: torch.Tensor,
+):
+    """
+    Update best_reward, best_feasible, and best_solution in-place.
+
+    Args:
+        best_reward (Tensor): shape (B,)
+        best_feasible (Tensor): shape (B,), bool
+        best_solution (Tensor): shape (B, solution_size)
+        new_reward (Tensor): shape (B,)
+        new_feasible (Tensor): shape (B,), bool
+        new_solution (Tensor): shape (B, solution_size)
+    """
+    # Compute update mask
+    best_feasible = best_feasible.view(-1)
+    new_feasible = new_feasible.view(-1)
+    best_reward = best_reward.view(-1)
+    new_reward = new_reward.view(-1)
+    best_solution = best_solution.view(best_feasible.size(0), -1)
+    new_solution = new_solution.view(best_feasible.size(0), -1)
+    case1 = new_feasible & (~best_feasible)
+    case2 = new_feasible & best_feasible & (new_reward < best_reward)
+    case3 = (~new_feasible) & (~best_feasible) & (new_reward < best_reward)
+
+    update_mask = case1 | case2 | case3
+
+    # In-place update
+    best_reward[update_mask] = new_reward[update_mask]
+    best_feasible[update_mask] = new_feasible[update_mask]
+    best_solution[update_mask] = new_solution[update_mask]
+

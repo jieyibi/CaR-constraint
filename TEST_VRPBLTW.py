@@ -89,7 +89,6 @@ def args2dict(args):
                       "load_optimizer": args.load_optimizer, "uncertainty_weight": args.uncertainty_weight,
                       "dynamic_coefficient": args.dynamic_coefficient, "coefficient": args.coefficient,
                       # constraints
-                      "wo_node_penalty": args.wo_node_penalty, "wo_tour_penalty": args.wo_tour_penalty,
                       "soft_constrained": args.soft_constrained, "backhaul_mask": args.backhaul_mask,
                       "non_linear": args.non_linear, "non_linear_cons": args.non_linear_cons, "epsilon": args.epsilon,
                       "epsilon_base": args.epsilon_base, "epsilon_decay_beta": args.epsilon_decay_beta,
@@ -149,34 +148,51 @@ def main(rank, world_size, args, env_params, model_params, optimizer_params, tra
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Towards Unified Models for Routing Problems")
     # env_params
-    parser.add_argument('--problem', type=str, default="TSPTW", choices=["CVRP", "TSPTW", "TSPDL", "VRPBLTW"])
+    parser.add_argument('--problem', type=str, default="VRPBLTW", choices=["Train_ALL", "CVRP", "OVRP", "VRPB", "VRPL", "VRPTW", "OVRPTW",
+                                                                             "OVRPB", "OVRPL", "VRPBL", "VRPBTW", "VRPLTW", "TSPTW", "TSPDL",
+                                                                             "OVRPBL", "OVRPBTW", "OVRPLTW", "VRPBLTW", "OVRPBLTW"])
     parser.add_argument('--tw_type', type=str, default="da_silva", choices=["da_silva", "cappart", "zhang", "random"])
     parser.add_argument('--tw_duration', type=str, default="1020", choices=["1020", "75100", "2550", "5075", "random", "curriculum"])
     parser.add_argument('--dl_percent', type=int, default=90, help="percentage of nodes that DL < total demand")
     parser.add_argument('--random_delta_t', type=float, default=0)
-    parser.add_argument('--problem_size', type=int, default=50)
-    parser.add_argument('--pomo_size', type=int, default=50, help="the number of start node, should <= problem size")
+    parser.add_argument('--problem_size', type=int, default=100)
+    parser.add_argument('--pomo_size', type=int, default=100, help="the number of start node, should <= problem size")
     parser.add_argument('--pomo_start', type=bool, default=False)
     parser.add_argument('--pomo_feasible_start', type= bool, default=False)
     parser.add_argument('--fsb_start_delay', type=int, default=10000)
-    parser.add_argument('--val_dataset', type=str, nargs='+', default =["tsptw50_da_silva_uniform.pkl"]) # ["tsptw100_da_silva_uniform_varyN.pkl"]
+    parser.add_argument('--val_dataset', type=str, nargs='+', default =None) # ["tsptw100_da_silva_uniform_varyN.pkl"]
+    parser.add_argument('--select_top_k_val', type=int, default=1)
+    parser.add_argument('--select_top_k', type=int, default=10)
+    parser.add_argument('--improve_steps', type=int, default=5)
+    parser.add_argument('--validation_improve_steps', type=int, default= 20)
     parser.add_argument('--enable_eas', type=bool, default=False)
     parser.add_argument('--iterations', type=int, default=200, help='Number of iterations for EAS')
-    parser.add_argument('--iterations_impr', type=int, default=20, help='Number of iterations for EAS')
-    parser.add_argument('--best_solution_path', type=str, default=None) #"cvrp50_car_eas_best_solution_t200") #"tw50_pip_best_solution.pkl")
-    parser.add_argument('--refinement_history_path', type=str, default=None) #"cvrp50_car_eas_history_t200") #"")
+    parser.add_argument('--iterations_impr', type=int, default=10, help='Number of iterations for EAS')
+    parser.add_argument('--best_solution_path', type=str, default=None) #"bltw50_car_rr_best_solution_t200") #"tw50_pip_best_solution.pkl")
+    parser.add_argument('--refinement_history_path', type=str, default=None) #"bltw50_car_rr_history_t200") #"")
 
     # tester_params
-    parser.add_argument('--eval_only', type=bool, default=False)
-    parser.add_argument('--test_episodes', type=int, default=10000)
-    parser.add_argument('--test_batch_size', type=int, default=10000)
+    parser.add_argument('--eval_only', type=bool, default=True)
+    parser.add_argument('--test_episodes', type=int, default=1000)
+    parser.add_argument('--test_batch_size', type=int, default=500)
     parser.add_argument("--test_pomo_size", type=int, default=1)
-    parser.add_argument('--test_dataset', type=str, nargs='+', default=None)#["tsptw100_da_silva_uniform.pkl"]
-    parser.add_argument('--test_z_sample_size', type=int, default=0)
+    parser.add_argument('--test_dataset', type=str, default=None)
+    # parser.add_argument('--test_dataset', type=str, nargs='+', default=['/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n120-k6.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n172-k51.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n157-k13.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n134-k13.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n190-k8.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n200-k36.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n139-k10.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n228-k23.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n219-k73.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n106-k14.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n247-k50.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n195-k51.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n129-k18.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n209-k16.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n251-k28.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n162-k11.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n125-k30.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n115-k10.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n167-k10.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n110-k13.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n153-k22.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n148-k46.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n176-k26.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n186-k15.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n101-k25.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n143-k7.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n181-k23.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n237-k14.pkl'])#["tsptw100_da_silva_uniform.pkl"]
     parser.add_argument('--is_lib', type=bool, default=False)
+    parser.add_argument('--test_z_sample_size', type=int, default=0)
     parser.add_argument('--eval_type', type=str, default="argmax", choices=["argmax", "softmax"])
     parser.add_argument('--sample_size', type=int, default = 1)
-    parser.add_argument('--aux_mask', type=bool, default=False, help="only activates when problem == VRPBLTW")
+    parser.add_argument('--aux_mask', type=bool, default=True, help="only activates when problem == VRPBLTW")
+
+    # load
+    parser.add_argument('--gpu_id', type=str, default="1")
+    parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/VRPBLTW50/20250120_174629_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_diversity_IL_co10/epoch-5000.pt")
+    # parser.add_argument('--checkpoint', type=str, default="./test/VRPBLTW50/20250119_223349_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_N2S_diversity_IL_co10/epoch-5000.pt")
+    # parser.add_argument('--checkpoint', type=str, default="./test/VRPBLTW100/20250219_220016_VRPBLTW100_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprREALTop3Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_diversity_IL/epoch-5000.pt")
+    # parser.add_argument('--checkpoint', type=str, default="./test/VRPBLTW100/20250219_215131_VRPBLTW100_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprREALTop3Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1InsAfterN2S_diversity_IL/epoch-5000.pt")
+    # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/20250103_110958_VRPBLTW100_rmPOMOstart_Hard_construction_only/epoch-5000.pt")
+    # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/VRPBLTW100/20250103_110904_VRPBLTW100_rmPOMOstart_Soft_construction_only/epoch-5000.pt")
+    parser.add_argument('--load_optimizer', type=bool, default=False)
 
     # model_params
     parser.add_argument('--model_type', type=str, default="SINGLE", choices=["SINGLE", "MTL", "MOE"])
@@ -188,6 +204,7 @@ if __name__ == "__main__":
     parser.add_argument('--unified_encoder', type=bool, default=True)
     parser.add_argument('--unified_decoder', type=bool, default=False)
     parser.add_argument('--n2s_decoder', type=bool, default=False)
+    parser.add_argument('--improvement_method', type=str, default="kopt", choices=["rm_n_insert", "kopt", "all"])
     parser.add_argument('--v_range', type=float, default=6.0, help='to control the entropy')
     parser.add_argument('--qkv_dim', type=int, default=16)
     parser.add_argument('--head_num', type=int, default=8)
@@ -230,10 +247,9 @@ if __name__ == "__main__":
     parser.add_argument('--train_episodes', type=int, default=10000*2, help="the num. of training instances per epoch")
     parser.add_argument('--accumulation_steps', type=int, default=1)
     parser.add_argument('--train_batch_size', type=int, default=64*2)
-    parser.add_argument('--validation_interval', type=int, default=500)
-    parser.add_argument('--validation_batch_size', type=int, default=2500)
-    parser.add_argument('--select_top_k_val', type=int, default=1)
-    parser.add_argument('--val_episodes', type=int, default=10000)
+    parser.add_argument('--validation_interval', type=int, default=200)
+    parser.add_argument('--validation_batch_size', type=int, default=500)
+    parser.add_argument('--val_episodes', type=int, default=1000)
     parser.add_argument("--val_pomo_size", type=int, default=1)
     parser.add_argument('--model_save_interval', type=int, default=50)
 
@@ -243,9 +259,9 @@ if __name__ == "__main__":
     parser.add_argument('--pip_step', type=int, default=1)
     parser.add_argument('--pip_decoder', action='store_true', default=False)
     parser.add_argument('--lazy_pip_model', type=bool, default=False)
-    parser.add_argument('--simulation_stop_epoch', type=int, default=100) # use 100 when N=100; 200 when N=50
+    parser.add_argument('--simulation_stop_epoch', type=int, default=100) # use 100 when N=100
     parser.add_argument('--pip_update_interval', type=int, default=1000)
-    parser.add_argument('--pip_update_epoch', type=int, default=20) # use 20 when N=100; 50 when N=50
+    parser.add_argument('--pip_update_epoch', type=int, default=20) # use 20 when N=100
     parser.add_argument('--pip_last_growup', type=int, default=50)
     parser.add_argument('--load_which_pip', type=str, default="train_fsb_bsf", choices=["last_epoch", "train_fsb_bsf", "train_infsb_bsf", "train_accuracy_bsf"])
     parser.add_argument('--pip_checkpoint', type=str, default=None)
@@ -253,12 +269,10 @@ if __name__ == "__main__":
     # constraints
     parser.add_argument('--soft_constrained', type=bool, default=True)
     parser.add_argument('--backhaul_mask', type=str, default="soft", choices=["soft", "hard"])
-    parser.add_argument('--wo_node_penalty', type=bool, default=False)
-    parser.add_argument('--wo_tour_penalty', type=bool, default=False)
     parser.add_argument('--non_linear', type=str, default=None, choices=[None, "fixed_epsilon", "decayed_epsilon", "step", "scalarization"])
     # "step" means separating the target of cost and penalty during improvement training
     parser.add_argument('--epsilon', type=float, default=3.67)
-    parser.add_argument('--epsilon_base', type=float, default=5.)
+    parser.add_argument('--epsilon_base', type=float, default=10.)
     parser.add_argument('--epsilon_decay_beta', type=float, default=0.001)
     parser.add_argument('--non_linear_cons', type=bool, default=False, help="enable non-linear reward function during construction")
     parser.add_argument('--out_reward', type=bool, default=True)
@@ -289,12 +303,11 @@ if __name__ == "__main__":
     parser.add_argument('--imitation_loss_weight', type=float, default=1.)
 
     # improvement
-    parser.add_argument('--improvement_only', type=bool, default=True)
-    parser.add_argument('--improvement_method', type=str, default="kopt", choices=["rm_n_insert", "kopt", "all"])
+    parser.add_argument('--improvement_only', type=bool, default=False)
     parser.add_argument('--boundary', type=float, default=0.5)
     parser.add_argument('--insert_before', type=bool, default=True)
     parser.add_argument('--rm_num', type=int, default=1)
-    parser.add_argument('--coefficient', type=float, default=100)
+    parser.add_argument('--coefficient', type=float, default=10)
     parser.add_argument('--reconstruct', type=bool, default=False)
     parser.add_argument('--reconstruct_improve_bonus', type=bool, default=False)
     parser.add_argument('--reconstruct_bonus_weight', type=float, default=1.)
@@ -302,25 +315,22 @@ if __name__ == "__main__":
     parser.add_argument('--k_unconfident', type=int, default=10)
     parser.add_argument('--init_sol_strategy', type=str, default="POMO", choices=["random", "greedy_feasible", "random_feasible", "POMO"])
     parser.add_argument('--val_init_sol_strategy', type=str, default="POMO", choices=["random", "greedy_feasible", "random_feasible", "POMO"])
-    # parser.add_argument('--POMO_checkpoint', type=str, default="./results/20241020_210610_VRPBLTW_rmPOMOstart_soft_backhaulSoft_penaltyWeight1/epoch-5000.pt")
-    # parser.add_argument('--POMO_checkpoint', type=str, default="../PIP-constraint/POMO+PIP/pretrained/TSPTW/tsptw50_hard/POMO_star_PIP/epoch-10000.pt")
-    # parser.add_argument('--POMO_checkpoint', type=str, default="../PIP-constraint/POMO+PIP/pretrained/TSPTW/tsptw50_hard/POMO_star_PIP/epoch-10000.pt")
-    parser.add_argument('--POMO_checkpoint', type=str, default="../PIP-constraint/POMO+PIP/pretrained/TSPTW/tsptw50_hard/POMO_star/epoch-10000.pt")
-    parser.add_argument('--max_dummy_size', type=int, default=18)
-    parser.add_argument('--improve_start_when_dummy_ok', type=bool, default=False)
-    parser.add_argument('--improve_steps', type=int, default=5)
+    parser.add_argument('--POMO_checkpoint', type=str, default="results/20240831_221004_TSPTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_construction_only/epoch-5000.pt")
+    parser.add_argument('--max_dummy_size', type=int, default=12)
+    parser.add_argument('--improve_start_when_dummy_ok', type=bool, default=True)
+    # parser.add_argument('--improve_steps', type=int, default=5)
     parser.add_argument('--dummy_improve_steps', type=int, default=0)
     parser.add_argument('--dummy_improve_selected', type=str, default="random", choices=["random", "topk"])
-    parser.add_argument('--validation_improve_steps', type=int, default=20)
+
     parser.add_argument('--val_reconstruct_times', type=int, default=1)
     parser.add_argument('--select_strategy', type=str, default="quality", choices=["quality", "diversity", "quality_stochastic", "diversity_stochastic", "stochastic"])
-    parser.add_argument('--select_top_k', type=int, default=10)
+    # parser.add_argument('--select_top_k', type=int, default=5)
     # parser.add_argument('--validation_select_top_k', type=int, default=20)
     parser.add_argument('--stochastic_probability', type=float, default=0.5)
     parser.add_argument('--diversity', type=str, default="kendall_tau_distance", choices=["kendall_tau_distance", "jaccard_distance"])
     parser.add_argument('--total_history', type=int, default=3)
     parser.add_argument('--with_infsb_feature', type=bool, default=True)
-    parser.add_argument('--supplement_feature_dim', type=int, default=5) # for cvrp:5; for tsptw:5; for vrpbltw: 17
+    parser.add_argument('--supplement_feature_dim', type=int, default=17) # for cvrp:5; for tsptw:5; for vrpbltw: 17
     parser.add_argument('--with_explore_stat_feature', type=bool, default=True)
     parser.add_argument('--with_RNN', type=bool, default=True)
     parser.add_argument('--k_max', type=int, default=4)
@@ -328,22 +338,18 @@ if __name__ == "__main__":
     parser.add_argument('--with_bonus', type=bool, default=False)
     parser.add_argument('--seperate_obj_penalty', type=bool, default=False)
 
-    # load
-    parser.add_argument('--checkpoint', type=str, default=None)
-    parser.add_argument('--load_optimizer', type=bool, default=True)
 
     # settings (e.g., GPU)
     parser.add_argument('--seed', type=int, default=2023)
     parser.add_argument('--log_dir', type=str, default="./results")
     parser.add_argument('--no_cuda', action='store_true')
-    parser.add_argument('--gpu_id', type=str, default="1,2,3")
-    parser.add_argument('--world_size', type=int, default=3)
-    parser.add_argument("--multiple_gpu", type=bool, default=True)
+    parser.add_argument('--world_size', type=int, default=1)
+    parser.add_argument("--multiple_gpu", type=bool, default=False)
     parser.add_argument('--occ_gpu', type=float, default=0., help="occupy (X)% GPU memory in advance, please use sparingly.")
     parser.add_argument('--tb_logger', type=bool, default=True)
     parser.add_argument('--wandb_logger', type=bool, default=True)
     parser.add_argument('--clean_cache', type=bool, default=False)
-    parser.add_argument('--multi_processing', type=bool, default=True)
+    parser.add_argument('--multi_processing', type=bool, default=False)
 
     args = parser.parse_args()
     if args.eval_only:
@@ -369,10 +375,7 @@ if __name__ == "__main__":
     # note = "_TSPTW100_Hard_rmPOMOstart_Soft_womask_withPenalty_varyN_construction_only"
     # note = "_TSPTW50_rmPOMOstart_Soft_sperateModel_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP"
     # note = "_TSPTW50_Hard_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP"
-    # note = "_TSPTW50Easy_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL"
-    note = "_TSPTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_Impr10sampledFromPOMOstar_Impro5Val20_AMP_kopt"
-    # note = "_TSPDL100Hard_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL_PIP"
-    # note = "_TSPTW100Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL_PIP-D"
+    # note = "_TSPTW50_rmPOMOstart_Soft_sperateModel_seperateTraining_GroupBaseline_Impr10sampledFromPOMO_Impro5Val20_AMP"
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_tw+capacity"
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_learnable_reward" #_learnable_reward
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_correct_primal_dual" # currently not the primary objective
@@ -391,17 +394,17 @@ if __name__ == "__main__":
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_NonLinear_scalarization_imprOnly" # neighbourhood search
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay5_0001_cons10l+p" #
     # note = "_VRPBLTW_rmPOMOstart_Hard_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear3p67"
-    # note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_diversity_IL_NonLinear_decay5_0001_dynamicco" #
-    # note = "_VRPBLTW100_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop3Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_diversity_IL_NonLinear_decay5_0001"  #
+    # note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay5_0001_cons10l+p" #
+    # note = "_VRPBLTW100_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop3Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_diversity_IL"  #
     # note = "_VRPBLTW100_rmPOMOstart_Soft_construction_only" #
     # note = "_VRPBLTW100_rmPOMOstart_Hard_construction_only" #
     # note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay5_0001_cons10l+p"
     # note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay5_0001_RC"
     # note = "_VRPBLTW100_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1Insbefore_diversity_IL_NonLinear_decay10_0001"  #
     # note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprSample5Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1InsAfterN2S_diversity_IL_NonLinear_decay5_0001_co10_RC"
-    # note = "_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprPOMO5_Impro5Val20_AMP_warmstart_noregnobonus_N2S_diversity_IL"  #
+    # note = "_VRPBLTW100_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprREALTop3Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1InsAfterN2S_diversity_IL_NonLinear_decay10_0001_co10_from3100top1"  #
     # note = "debug"
-    # note = "test "
+    note = "test"
     if "debug" in note:
         args.wandb_logger = False
         args.tb_logger = False

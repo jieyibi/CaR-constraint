@@ -277,7 +277,7 @@ class VRPBLTWEnv:
         done = False
         return self.step_state, reward, done
 
-    def step(self, selected, out_reward = False, soft_constrained = False, backhaul_mask = "hard", penalty_normalize=True):
+    def step(self, selected, out_reward = False, soft_constrained = False, backhaul_mask = "hard", penalty_normalize=True, generate_PI_mask=False,use_predicted_PI_mask=False, pip_step=1):
         # selected.shape: (batch, pomo)
 
         # Dynamic-1
@@ -435,11 +435,11 @@ class VRPBLTWEnv:
         if done:
             self.dummy_size = self.selected_node_list.size(-1) - self.problem_size
             total_timeout_reward = -self.timeout_list.sum(dim=-1)
-            timeout_nodes_reward = -torch.where(self.timeout_list > 0, torch.ones_like(self.timeout_list), self.timeout_list).sum(-1).int()
+            timeout_nodes_reward = -torch.where(self.timeout_list > round_error_epsilon, torch.ones_like(self.timeout_list), self.timeout_list).sum(-1).int()
             total_out_of_dl_reward = -self.out_of_dl_list.sum(dim=-1)
-            out_of_dl_nodes_reward = -torch.where(self.out_of_dl_list > 0, torch.ones_like(self.out_of_dl_list),self.out_of_dl_list).sum(-1).int()
+            out_of_dl_nodes_reward = -torch.where(self.out_of_dl_list > round_error_epsilon, torch.ones_like(self.out_of_dl_list),self.out_of_dl_list).sum(-1).int()
             total_out_of_capacity_reward = -self.out_of_capacity_list.sum(dim=-1)
-            out_of_capacity_nodes_reward = -torch.where(self.out_of_capacity_list > 0, torch.ones_like(self.out_of_capacity_list), self.out_of_capacity_list).sum(-1).int()
+            out_of_capacity_nodes_reward = -torch.where(self.out_of_capacity_list > round_error_epsilon, torch.ones_like(self.out_of_capacity_list), self.out_of_capacity_list).sum(-1).int()
             self.infeasible = (timeout_nodes_reward + out_of_dl_nodes_reward + out_of_capacity_nodes_reward != 0.)
             # shape: (batch, pomo)
             infeasible = self.infeasible
@@ -651,7 +651,7 @@ class VRPBLTWEnv:
         # assert (self.visited_ninf_flag == float('-inf')).all(), "not visiting all nodes!"
         # assert torch.gather(~self.infeasible, 1, select_idx).all(), "not valid tour!"
 
-    def get_costs(self, rec, get_context=False, check_full_feasibility=False, out_reward=False, penalty_factor=1.0, penalty_normalize=False, seperate_obj_penalty=False, non_linear=None):
+    def get_costs(self, rec, get_context=False, check_full_feasibility=False, out_reward=False, penalty_factor=1.0, penalty_normalize=False, seperate_obj_penalty=False, non_linear=None, wo_node_penalty=False, wo_tour_penalty =False):
 
         k = rec.size(0) // self.depot_node_xy.size(0)
         self.dummy_size = rec.size(1) - self.problem_size

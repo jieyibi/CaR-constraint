@@ -119,9 +119,8 @@ class SINGLEModel(nn.Module):
         # pdb.set_trace()
         if not self.model_params["improvement_only"] or self.model_params["unified_decoder"]: # construct or improve use POMO decoder
             self.decoder.set_kv(self.encoded_nodes, z)
-        if self.model_params["dual_decoder"]:
-            self.feasible_decoder.set_kv(self.encoded_nodes)
-
+        if self.model_params["pip_decoder"]:
+            self.decoder.set_kv_sl(self.encoded_nodes)
 
         return self.encoded_nodes, feature
 
@@ -142,7 +141,7 @@ class SINGLEModel(nn.Module):
     def pre_forward_rc(self, env, rec, context):
         batch_size, solution_size = rec.size()
         # supplementary node features based on current solution
-        if self.problem in ['CVRP', "TSPTW", "VRPBLTW"]:
+        if self.problem in ['CVRP', "TSPTW", "VRPBLTW", "TSPDL"]:
             visited_time, depot_feature, node_feature = env.get_dynamic_feature(context, self.model_params["with_infsb_feature"], tw_normalize=self.model_params["tw_normalize"])
         else:
             raise NotImplementedError()
@@ -167,15 +166,22 @@ class SINGLEModel(nn.Module):
         self.eval_type = eval_type
 
     def forward(self, state, solver="construction", selected=None, pomo = False, candidate_feature=None,
-                feasible_start = None, return_probs=False, require_entropy=False, fixed_action = None, use_LoRA=False):
+                feasible_start = None, return_probs=False, require_entropy=False, fixed_action = None, use_LoRA=False,
+                use_predicted_PI_mask=False, no_select_prob=False, EAS_incumbent_action=None):
 
         if solver == "construction":
             batch_size = state.BATCH_IDX.size(0)
             pomo_size = state.BATCH_IDX.size(1)
 
             if state.selected_count == 0:  # First Move, depot
+                # if EAS_incumbent_action is not None:
+                #     selected = torch.zeros(size=(batch_size, pomo_size+1), dtype=torch.long).to(self.device)
+                #     prob = torch.ones(size=(batch_size, pomo_size+1))
+                # else:
                 selected = torch.zeros(size=(batch_size, pomo_size), dtype=torch.long).to(self.device)
                 prob = torch.ones(size=(batch_size, pomo_size))
+                if self.model_params["pip_decoder"]:
+                    probs_sl = torch.ones(size=(batch_size, pomo_size))
                 # probs = torch.ones(size=(batch_size, pomo_size, self.encoded_nodes.size(1)))
                 # shape: (batch, pomo, problem_size+1)
 
@@ -189,21 +195,25 @@ class SINGLEModel(nn.Module):
                 # # shape: (batch, 1, embedding)
                 # self.decoder.set_q2(encoded_first_node)
             elif (feasible_start is not None or pomo) and state.selected_count == 1 and pomo_size > 1:  # Second Move, POMO
-                    # selected = torch.arange(start=1, end=pomo_size+1)[None, :].expand(batch_size, pomo_size).to(self.device)
-                    if feasible_start is not None:
-                        batch_indices, value_indices = (feasible_start[:,0,:] == 0).nonzero(as_tuple=True)
-                        selected = torch.zeros((batch_size, pomo_size), dtype=torch.long)
-                        for i in range(batch_size):
-                            current_batch_indices = value_indices[batch_indices == i]
-                            if len(current_batch_indices) > 0:
-                                sampled_indices = current_batch_indices[torch.randint(len(current_batch_indices), (pomo_size,))]
-                                selected[i] = sampled_indices
-                            else:
-                                assert 0, "Warning! Infeasible instance appears!"
-                        state.START_NODE = selected
-                    else:
-                        selected = state.START_NODE
-                    prob = torch.ones(size=(batch_size, pomo_size))
+                # selected = torch.arange(start=1, end=pomo_size+1)[None, :].expand(batch_size, pomo_size).to(self.device)
+                if feasible_start is not None:
+                    batch_indices, value_indices = (feasible_start[:,0,:] == 0).nonzero(as_tuple=True)
+                    selected = torch.zeros((batch_size, pomo_size), dtype=torch.long)
+                    for i in range(batch_size):
+                        current_batch_indices = value_indices[batch_indices == i]
+                        if len(current_batch_indices) > 0:
+                            sampled_indices = current_batch_indices[torch.randint(len(current_batch_indices), (pomo_size,))]
+                            selected[i] = sampled_indices
+                        else:
+                            assert 0, "Warning! Infeasible instance appears!"
+                    state.START_NODE = selected
+                else:
+                    selected = state.START_NODE
+                    if EAS_incumbent_action is not None:
+                        selected = torch.cat((torch.arange(start=1, end=pomo_size)[None, :].expand(batch_size, pomo_size-1), EAS_incumbent_action[:, None]), dim=1)
+                prob = torch.ones(size=(batch_size, pomo_size))
+                if self.model_params["pip_decoder"]:
+                    probs_sl = torch.ones(size=(batch_size, pomo_size))
             else:
                 encoded_last_node = _get_encoding(self.encoded_nodes, state.current_node)
                 # shape: (batch, pomo, embedding)
@@ -211,10 +221,12 @@ class SINGLEModel(nn.Module):
 
                 ninf_mask = state.ninf_mask
 
-                if self.model_params["dual_decoder"]:
-                    probs1 = self.decoder(encoded_last_node, attr, ninf_mask=ninf_mask)
-                    probs2 = self.feasible_decoder(encoded_last_node, attr, ninf_mask=ninf_mask)
-                    probs =  self.model_params["fsb_decoder_weight"] * probs2 + (1-self.model_params["fsb_decoder_weight"]) * probs1
+                if self.model_params["pip_decoder"]:  # auxiliary decoder to predict whether nodes are feasible
+                    if not no_select_prob:
+                        probs, probs_sl = self.decoder(encoded_last_node, attr, ninf_mask=ninf_mask, use_predicted_PI_mask=use_predicted_PI_mask)
+                    else:
+                        probs_sl = self.decoder(encoded_last_node, attr, ninf_mask=ninf_mask, use_predicted_PI_mask=use_predicted_PI_mask, no_select_prob=no_select_prob)
+                        return probs_sl
                 else:
                     probs = self.decoder(encoded_last_node=encoded_last_node, attr=attr, ninf_mask=ninf_mask, return_probs = return_probs)
                     if return_probs:
@@ -224,6 +236,8 @@ class SINGLEModel(nn.Module):
                     while True:
                         if self.training or self.eval_type == 'softmax':
                             selected = probs.reshape(batch_size * pomo_size, -1).multinomial(1).squeeze(dim=1).reshape(batch_size, pomo_size)
+                            if EAS_incumbent_action is not None:
+                                selected[:, -1] = EAS_incumbent_action
                             # try:
                             #     selected = probs.reshape(batch_size * pomo_size, -1).multinomial(1).squeeze(dim=1).reshape(batch_size, pomo_size)
                             # except Exception as exception:
@@ -232,10 +246,13 @@ class SINGLEModel(nn.Module):
                             #     exit(0)
                         else:
                             selected = probs.argmax(dim=2)
+
                         prob = probs[state.BATCH_IDX, state.POMO_IDX, selected].reshape(batch_size, pomo_size)
                         # shape: (batch, pomo)
                         if (prob != 0).all():
                             break
+                        else:
+                            probs
                 else:
                     selected = selected
                     prob = probs[state.BATCH_IDX, state.POMO_IDX, selected].reshape(batch_size, pomo_size)
@@ -248,6 +265,8 @@ class SINGLEModel(nn.Module):
             #         prob1 = torch.ones(size=(batch_size, pomo_size))
             #         prob2 = torch.ones(size=(batch_size, pomo_size))
             #     return selected, [prob1, prob2]
+            if self.model_params['pip_decoder']:
+                prob = [prob, probs_sl]
             if return_probs:
                 if state.selected_count != 0:
                     return selected, prob, probs_return
@@ -263,7 +282,7 @@ class SINGLEModel(nn.Module):
             # node_embedding = node_embedding.repeat_interleave(batch_size//node_embedding.size(0), 0)
             #
             # supplementary node features based on current solution
-            if self.problem in ['CVRP', "TSPTW", "VRPBLTW"]:
+            if self.problem in ['CVRP', "TSPTW", "VRPBLTW", "TSPDL"]:
                 visited_time, depot_feature, node_feature = env.get_dynamic_feature(context, self.model_params["with_infsb_feature"], tw_normalize=self.model_params["tw_normalize"])
             # elif self.problem == 'TSP':
             #     visited_time = env.get_order(rec, return_solution=False)
@@ -470,6 +489,9 @@ class SINGLE_Encoder(nn.Module):
         layer_i = 0
         for layer in self.layers:
             # only enable the last few layers
+            if route_attn is not None:
+                if torch.isnan(out).any():
+                    print("logits contains NaN!")
             out = layer(out, use_LoRA, route_attn)
             # if route_attn is not None and layer_i < self.impr_encoder_start_idx: # disabled layer in improvement
             #     layer_i += 1
@@ -704,27 +726,46 @@ class SINGLE_Decoder(nn.Module):
         self.embedding_dim = embedding_dim
         self.gumbel = self.model_params['gumbel']
 
+        self.use_EAS_layers = False
+
         # self.Wq_1 = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         # self.Wq_2 = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         if self.problem == "CVRP":
             self.Wq_last = nn.Linear(embedding_dim + 1, head_num * qkv_dim, bias=False)
+            if self.model_params["pip_decoder"]:
+                self.Wq_last_sl = nn.Linear(embedding_dim + 1, head_num * qkv_dim, bias=False)
         elif self.problem in ["VRPB", "TSPTW", "TSPDL"]:
             self.Wq_last = nn.Linear(embedding_dim + 1, head_num * qkv_dim, bias=False)
+            if self.model_params["pip_decoder"]:
+                self.Wq_last_sl = nn.Linear(embedding_dim + 1, head_num * qkv_dim, bias=False)
         elif self.problem in ["OVRP", "OVRPB", "VRPTW", "VRPBTW", "VRPL", "VRPBL"]:
             attr_num = 3 if self.model_params["extra_feature"] else 2
             self.Wq_last = nn.Linear(embedding_dim + attr_num, head_num * qkv_dim, bias=False)
+            if self.model_params["pip_decoder"]:
+                self.Wq_last_sl = nn.Linear(embedding_dim + attr_num, head_num * qkv_dim, bias=False)
         elif self.problem in ["VRPLTW", "VRPBLTW", "OVRPL", "OVRPBL", "OVRPTW", "OVRPBTW"]:
             self.Wq_last = nn.Linear(embedding_dim + 3, head_num * qkv_dim, bias=False)
+            if self.model_params["pip_decoder"]:
+                self.Wq_last_sl = nn.Linear(embedding_dim + 3, head_num * qkv_dim, bias=False)
         elif self.problem in ["OVRPLTW", "OVRPBLTW"]:
             self.Wq_last = nn.Linear(embedding_dim + 4, head_num * qkv_dim, bias=False)
+            if self.model_params["pip_decoder"]:
+                self.Wq_last_sl = nn.Linear(embedding_dim + 4, head_num * qkv_dim, bias=False)
         else:
             raise NotImplementedError
 
         self.Wk = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         self.Wv = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        if self.model_params["pip_decoder"]:
+            self.Wk_sl = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+            self.Wv_sl = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+            self.k_sl = None  # saved key, for multi-head_attention
+            self.v_sl = None  # saved value, for multi-head_attention
+            self.single_head_key_sl = None
 
         self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
-
+        if self.model_params["pip_decoder"]:
+            self.multi_head_combine_sl = nn.Linear(head_num * qkv_dim, embedding_dim)
 
         self.k = None  # saved key, for multi-head_attention
         self.v = None  # saved value, for multi-head_attention
@@ -778,6 +819,14 @@ class SINGLE_Decoder(nn.Module):
         self.z = z
         # shape: (batch, rollout, z_dim)
 
+    def set_kv_sl(self, encoded_nodes):
+        # encoded_nodes.shape: (batch, problem+1, embedding)
+        head_num = self.model_params['head_num']
+
+        self.k_sl = reshape_by_heads(self.Wk_sl(encoded_nodes), head_num=head_num)
+        self.v_sl = reshape_by_heads(self.Wv_sl(encoded_nodes), head_num=head_num)
+        self.single_head_key_sl = encoded_nodes.transpose(1, 2)
+
     def set_kv_improve(self, h_em_final, z=None):
         # encoded_nodes.shape: (batch, problem+1, embedding)
         head_num = self.model_params['head_num']
@@ -804,17 +853,27 @@ class SINGLE_Decoder(nn.Module):
         # shape: (batch, head_num, n, qkv_dim)
 
     def reset_EAS_layers(self, batch_size): # only use during inference
-        self.EAS_W1 = torch.nn.Parameter(self.poly_layer_1.weight.mT.repeat(batch_size, 1, 1))
-        self.EAS_b1 = torch.nn.Parameter(self.poly_layer_1.bias.repeat(batch_size, 1))
-        self.EAS_W2 = torch.nn.Parameter(self.poly_layer_2.weight.mT.repeat(batch_size, 1, 1))
-        self.EAS_b2 = torch.nn.Parameter(self.poly_layer_2.bias.repeat(batch_size, 1))
+        # self.EAS_W1 = torch.nn.Parameter(self.poly_layer_1.weight.mT.repeat(batch_size, 1, 1))
+        # self.EAS_b1 = torch.nn.Parameter(self.poly_layer_1.bias.repeat(batch_size, 1))
+        # self.EAS_W2 = torch.nn.Parameter(self.poly_layer_2.weight.mT.repeat(batch_size, 1, 1))
+        # self.EAS_b2 = torch.nn.Parameter(self.poly_layer_2.bias.repeat(batch_size, 1))
+        emb_dim = self.model_params['embedding_dim']  # 128
+        init_lim = (1 / emb_dim) ** (1 / 2)
+
+        weight1 = torch.torch.distributions.Uniform(low=-init_lim, high=init_lim).sample((batch_size, emb_dim, emb_dim))
+        bias1 = torch.torch.distributions.Uniform(low=-init_lim, high=init_lim).sample((batch_size, emb_dim))
+        self.EAS_W1 = torch.nn.Parameter(weight1)
+        self.EAS_b1 = torch.nn.Parameter(bias1)
+        self.EAS_W2 = torch.nn.Parameter(torch.zeros(size=(batch_size, emb_dim, emb_dim)))
+        self.EAS_b2 = torch.nn.Parameter(torch.zeros(size=(batch_size, emb_dim)))
         self.use_EAS_layers = True
 
     def get_EAS_parameters(self): # only use during inference
         return [self.EAS_W1, self.EAS_b1, self.EAS_W2, self.EAS_b2]
 
     def forward(self, encoded_last_node=None, attr=None, ninf_mask=None, solver="construction", return_probs=False, improvement_method="kopt",
-                h_em_final=None, rec=None, context2=None, visited_time=None, last_action=None, fixed_action=None, require_entropy=False):
+                h_em_final=None, rec=None, context2=None, visited_time=None, last_action=None, fixed_action=None, require_entropy=False,
+                use_predicted_PI_mask=False, no_select_prob = False):
         # encoded_last_node.shape: (batch, pomo, embedding)
         # load.shape: (batch, 1~4)
         # ninf_mask.shape: (batch, pomo, problem)
@@ -825,6 +884,27 @@ class SINGLE_Decoder(nn.Module):
             #######################################################
             input_cat = torch.cat((encoded_last_node, attr), dim=2)
             # shape = (batch, group, EMBEDDING_DIM+1)
+
+            if self.model_params['pip_decoder']:
+                if isinstance(use_predicted_PI_mask, bool):
+                    q_last_sl = reshape_by_heads(self.Wq_last_sl(input_cat), head_num=head_num)
+                    ninf_mask_sl = None
+                    out_concat_sl = multi_head_attention(q_last_sl, self.k_sl, self.v_sl, rank3_ninf_mask=ninf_mask_sl)
+                    mh_atten_out_sl = self.multi_head_combine_sl(out_concat_sl)
+                    score_sl = torch.matmul(mh_atten_out_sl, self.single_head_key_sl)
+                    probs_sl = score_sl
+                    if no_select_prob:
+                        return probs_sl
+                else:
+                    probs_sl = use_predicted_PI_mask
+
+                if not isinstance(use_predicted_PI_mask, bool) or use_predicted_PI_mask: # note: not change ninf_mask in env but only modify the action probs
+                    ninf_mask0 = ninf_mask.clone()
+                    ninf_mask = torch.where(torch.sigmoid(probs_sl) > .5, float('-inf'), ninf_mask)
+                    all_infsb = ((ninf_mask == float('-inf')).all(dim=-1)).unsqueeze(-1).expand(-1, -1, self.single_head_key.size(-1))
+                    ninf_mask = torch.where(all_infsb, ninf_mask0, ninf_mask)
+
+            # shape: (batch, head_num, pomo, qkv_dim)
             q = reshape_by_heads(self.Wq_last(input_cat), head_num=head_num)
             # q_last = reshape_by_heads(self.Wq_last(input_cat), head_num=head_num)
             # q = self.q1 + self.q2 + q_last
@@ -854,6 +934,15 @@ class SINGLE_Decoder(nn.Module):
                     # shape: ?
                     poly_out += self.EAS_b2[:, None]
                 mh_atten_out += poly_out
+            # EAS Layer Insert
+            #######################################################
+            if self.use_EAS_layers:
+                ms1 = torch.matmul(mh_atten_out, self.EAS_W1) # shape: (batch, pomo, embedding)
+                ms1 = ms1 + self.EAS_b1[:, None, :] # shape: (batch, pomo, embedding)
+                ms1_activated = F.relu(ms1) # shape: (batch, pomo, embedding)
+                ms2 = torch.matmul(ms1_activated, self.EAS_W2) # shape: (batch, pomo, embedding)
+                ms2 = ms2 + self.EAS_b2[:, None, :] # shape: (batch, pomo, embedding)
+                mh_atten_out = mh_atten_out + ms2 # shape: (batch, pomo, embedding)
             #  Single-Head Attention, for probability calculation
             #######################################################
             score = torch.matmul(mh_atten_out, self.single_head_key)
@@ -871,6 +960,9 @@ class SINGLE_Decoder(nn.Module):
             score_masked = score_clipped + ninf_mask
             probs = torch.softmax(score_masked, dim=2)
             # shape: (batch, pomo, problem)
+
+            if self.model_params['pip_decoder']:
+                probs = [probs, probs_sl]
             if return_probs:
                 out_concat0 = self.attention_fn(q, self.k, self.v) # no mask
                 mh_atten_out0 = self.multi_head_combine(out_concat0)
@@ -1075,6 +1167,7 @@ class kopt_Decoder(nn.Module):
         self.with_explore_stat_feature = self.model_params['with_explore_stat_feature']
         self.k_max = self.model_params['k_max']
         self.rm_num = self.model_params["rm_num"]
+        self.use_EAS_layers = False
 
         self.linear_K1 = nn.Linear(self.embedding_dim, self.embedding_dim, bias=False)
         self.linear_K2 = nn.Linear(self.embedding_dim, self.embedding_dim, bias=False)
@@ -1110,6 +1203,29 @@ class kopt_Decoder(nn.Module):
         for param in self.parameters():
             stdv = 1. / math.sqrt(param.size(-1))
             param.data.uniform_(-stdv, stdv)
+
+    def reset_EAS_layers(self, batch_size): # only use during inference
+        # self.EAS_W1 = torch.nn.Parameter(self.poly_layer_1.weight.mT.repeat(batch_size, 1, 1))
+        # self.EAS_b1 = torch.nn.Parameter(self.poly_layer_1.bias.repeat(batch_size, 1))
+        # self.EAS_W2 = torch.nn.Parameter(self.poly_layer_2.weight.mT.repeat(batch_size, 1, 1))
+        # self.EAS_b2 = torch.nn.Parameter(self.poly_layer_2.bias.repeat(batch_size, 1))
+        emb_dim = self.model_params['embedding_dim']  # 128
+        init_lim = (1 / emb_dim) ** (1 / 2)
+
+        weight1 = torch.torch.distributions.Uniform(low=-init_lim, high=init_lim).sample((batch_size, emb_dim, emb_dim))
+        bias1 = torch.torch.distributions.Uniform(low=-init_lim, high=init_lim).sample((batch_size, emb_dim))
+        self.EAS_W1 = torch.nn.Parameter(weight1)
+        self.EAS_b1 = torch.nn.Parameter(bias1)
+        self.EAS_W2 = torch.nn.Parameter(torch.zeros(size=(batch_size, emb_dim, emb_dim)))
+        self.EAS_b2 = torch.nn.Parameter(torch.zeros(size=(batch_size, emb_dim)))
+        self.EAS_W1_2 = torch.nn.Parameter(weight1)
+        self.EAS_b1_2 = torch.nn.Parameter(bias1)
+        self.EAS_W2_2 = torch.nn.Parameter(torch.zeros(size=(batch_size, emb_dim, emb_dim)))
+        self.EAS_b2_2 = torch.nn.Parameter(torch.zeros(size=(batch_size, emb_dim)))
+        self.use_EAS_layers = True
+
+    def get_EAS_parameters(self): # only use during inference
+        return [self.EAS_W1, self.EAS_b1, self.EAS_W2, self.EAS_b2, self.EAS_W1_2, self.EAS_b1_2, self.EAS_W2_2, self.EAS_b2_2]
 
     def forward(self, h, rec, context2, visited_time, last_action, improvement_method="kopt", fixed_action=None, require_entropy=False):
         # input: h_em_final, rec, context2, visited_time, action
@@ -1159,18 +1275,46 @@ class kopt_Decoder(nn.Module):
                 q1 = input_q1
                 q2 = input_q2
 
+
             # Dual-Stream Attention
-            result = (linear_V1.unsqueeze(1) * torch.tanh(self.linear_K1(h) +
-                                                          self.linear_Q1(q1).unsqueeze(1) +
-                                                          self.linear_K3(h) * self.linear_Q3(q1).unsqueeze(1)
-                                                          )).sum(-1)  # \mu stream
-            result += (linear_V2.unsqueeze(1) * torch.tanh(self.linear_K2(h) +
-                                                           self.linear_Q2(q2).unsqueeze(1) +
-                                                           self.linear_K4(h) * self.linear_Q4(q2).unsqueeze(1)
-                                                           )).sum(-1)  # \lambda stream
+            if not self.use_EAS_layers:
+                result = (linear_V1.unsqueeze(1) * torch.tanh(self.linear_K1(h) +
+                                                              self.linear_Q1(q1).unsqueeze(1) +
+                                                              self.linear_K3(h) * self.linear_Q3(q1).unsqueeze(1)
+                                                              )).sum(-1)  # \mu stream
+                result += (linear_V2.unsqueeze(1) * torch.tanh(self.linear_K2(h) +
+                                                               self.linear_Q2(q2).unsqueeze(1) +
+                                                               self.linear_K4(h) * self.linear_Q4(q2).unsqueeze(1)
+                                                               )).sum(-1)  # \lambda stream
+            else:
+                # EAS Layer Insert
+                #######################################################
+                result = (linear_V1.unsqueeze(1) * torch.tanh(self.linear_K1(h) +
+                                                              self.linear_Q1(q1).unsqueeze(1) +
+                                                              self.linear_K3(h) * self.linear_Q3(q1).unsqueeze(1)
+                                                              ))
+                ms1 = torch.matmul(result, self.EAS_W1)  # shape: (batch, pomo, embedding)
+                ms1 = ms1 + self.EAS_b1[:, None, :]  # shape: (batch, pomo, embedding)
+                ms1_activated = F.relu(ms1)  # shape: (batch, pomo, embedding)
+                ms2 = torch.matmul(ms1_activated, self.EAS_W2)  # shape: (batch, pomo, embedding)
+                ms2 = ms2 + self.EAS_b2[:, None, :]  # shape: (batch, pomo, embedding)
+                result = result + ms2  # shape: (batch, pomo, embedding)
+                result = result.sum(-1)  # \mu stream
+                result_lambda = (linear_V2.unsqueeze(1) * torch.tanh(self.linear_K2(h) +
+                                                                     self.linear_Q2(q2).unsqueeze(1) +
+                                                                     self.linear_K4(h) * self.linear_Q4(q2).unsqueeze(1)
+                                                                     ))  # \lambda stream
+                ms1 = torch.matmul(result_lambda, self.EAS_W1_2)  # shape: (batch, pomo, embedding)
+                ms1 = ms1 + self.EAS_b1_2[:, None, :]  # shape: (batch, pomo, embedding)
+                ms1_activated = F.relu(ms1)  # shape: (batch, pomo, embedding)
+                ms2 = torch.matmul(ms1_activated, self.EAS_W2_2)  # shape: (batch, pomo, embedding)
+                ms2 = ms2 + self.EAS_b2_2[:, None, :]  # shape: (batch, pomo, embedding)
+                result_lambda = result_lambda + ms2  # shape: (batch, pomo, embedding)
+                result += result_lambda.sum(-1)
 
             # Calc probs
             logits = torch.tanh(result) * self.model_params['logit_clipping']
+            # # compromised fix
             if torch.isnan(logits).any():
                 print("logits contains NaN!")
                 logits = torch.where(torch.isnan(logits), torch.zeros_like(logits), logits)
@@ -1294,6 +1438,8 @@ class N2S_Decoder(nn.Module):
         self.input_dim = self.model_params['embedding_dim']
         self.v_range = self.model_params['v_range']
 
+        self.use_EAS_layers = False
+
         self.compater_removal = NodePairRemovalDecoder(self.model_params['head_num']//2, self.input_dim)
         self.compater_reinsertion = NodePairReinsertionDecoder(self.model_params['head_num']//2, self.input_dim)
 
@@ -1396,6 +1542,8 @@ class NodePairRemovalDecoder(nn.Module):  # (12) (13)
     def __init__(self, n_heads: int, input_dim: int) -> None:
         super().__init__()
 
+        self.use_EAS_layers = False
+
         # hidden_dim = input_dim // n_heads
         hidden_dim = input_dim
 
@@ -1471,6 +1619,8 @@ class NodePairReinsertionDecoder(nn.Module):  # (14) (15)
         super().__init__()
 
         self.n_heads = n_heads
+
+        self.use_EAS_layers = False
 
         self.compater_insert1 = MultiHeadAttention(
             n_heads, input_dim, input_dim, None, input_dim * n_heads

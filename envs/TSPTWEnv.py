@@ -335,7 +335,7 @@ class TSPTWEnv:
                 total_timeout_reward = -self.timeout_list.sum(dim=-1)
                 if penalty_normalize:
                     total_timeout_reward = total_timeout_reward / self.node_tw_end[:,:1]
-                timeout_nodes_reward = -torch.where(self.timeout_list>0, torch.ones_like(self.timeout_list), self.timeout_list).sum(-1).int()
+                timeout_nodes_reward = -torch.where(self.timeout_list>round_error_epsilon, torch.ones_like(self.timeout_list), self.timeout_list).sum(-1).int()
                 reward = [dist_reward, total_timeout_reward, timeout_nodes_reward]
             # not visited but can not reach
             # infeasible_rate = self.infeasible.sum() / (self.batch_size*self.pomo_size)
@@ -825,7 +825,7 @@ class TSPTWEnv:
         # assert (self.visited_ninf_flag == float('-inf')).all(), "not visiting all nodes!"
         # assert torch.gather(~self.infeasible, 1, select_idx).all(), "not valid tour!"
 
-    def get_costs(self, rec, get_context=False, check_full_feasibility=False, out_reward=False, penalty_factor=1.0, penalty_normalize=False, seperate_obj_penalty=False, non_linear=None):
+    def get_costs(self, rec, get_context=False, check_full_feasibility=False, out_reward=False, penalty_factor=1.0, penalty_normalize=False, seperate_obj_penalty=False, non_linear=None, wo_node_penalty=False, wo_tour_penalty =False):
 
         k = rec.size(0) // self.node_xy.size(0)
         # check full feasibility if needed
@@ -845,7 +845,12 @@ class TSPTWEnv:
         if penalty_normalize:
             out_penalty = out_penalty / context[-1][:, 0]
         if out_reward:
-            cost = cost + penalty_factor * (out_node_penalty + out_penalty)
+            if wo_node_penalty:
+                cost = cost + penalty_factor * (out_penalty)
+            elif wo_tour_penalty:
+                cost = cost + penalty_factor * (out_node_penalty)
+            else:
+                cost = cost + penalty_factor * (out_node_penalty + out_penalty)
 
         # get context
         if get_context:

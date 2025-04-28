@@ -174,6 +174,16 @@ class CVRPEnv:
         self.step_state.START_NODE = torch.arange(start=1, end=self.pomo_size+1)[None, :].expand(self.batch_size, -1).to(self.device)
         self.step_state.PROBLEM = self.problem
 
+    def reset_pomo_size_for_eas(self, new_rollout_size):
+        self.pomo_size = new_rollout_size
+        self.BATCH_IDX = torch.arange(self.batch_size)[:, None].expand(self.batch_size, self.pomo_size).to(self.device)
+        self.POMO_IDX = torch.arange(self.pomo_size)[None, :].expand(self.batch_size, self.pomo_size).to(self.device)
+        self.step_state.BATCH_IDX = self.BATCH_IDX
+        self.step_state.POMO_IDX = self.POMO_IDX
+        self.step_state.open = torch.zeros(self.batch_size, self.pomo_size).to(self.device)
+        self.step_state.START_NODE = torch.arange(start=1, end=self.pomo_size+1)[None, :].expand(self.batch_size, -1).to(self.device)
+
+
     def reset(self):
         self.selected_count = 0
         self.current_node = None
@@ -224,7 +234,7 @@ class CVRPEnv:
         done = False
         return self.step_state, reward, done
 
-    def step(self, selected, out_reward = False, soft_constrained = False, backhaul_mask = None, penalty_normalize=True):
+    def step(self, selected, out_reward = False, soft_constrained = False, backhaul_mask = None, penalty_normalize=True, generate_PI_mask=False,use_predicted_PI_mask=False, pip_step=1):
         # selected.shape: (batch, pomo)
 
         # Dynamic-1
@@ -259,7 +269,10 @@ class CVRPEnv:
 
         # Mask
         ####################################
-        self.visited_ninf_flag[self.BATCH_IDX, self.POMO_IDX, selected] = float('-inf')
+        try:
+            self.visited_ninf_flag[self.BATCH_IDX, self.POMO_IDX, selected] = float('-inf')
+        except:
+            print("")
         # shape: (batch, pomo, problem+1)
         self.visited_ninf_flag[:, :, 0][~self.at_the_depot] = 0  # depot is considered unvisited, unless you are AT the depot
 
@@ -306,7 +319,7 @@ class CVRPEnv:
             self.dummy_size = self.selected_node_list.size(-1) - self.problem_size
             reward = -self._get_travel_distance()  # note the minus sign!
             total_out_of_capacity_reward = -self.out_of_capacity_list.sum(dim=-1)
-            out_of_capacity_nodes_reward = -torch.where(self.out_of_capacity_list > 0, torch.ones_like(self.out_of_capacity_list), self.out_of_capacity_list).sum(-1).int()
+            out_of_capacity_nodes_reward = -torch.where(self.out_of_capacity_list > round_error_epsilon, torch.ones_like(self.out_of_capacity_list), self.out_of_capacity_list).sum(-1).int()
             infeasible = (out_of_capacity_nodes_reward != 0.)
             self.infeasible = infeasible
             # shape: (batch, pomo)
@@ -792,7 +805,8 @@ class CVRPEnv:
             assert (partial_sum_wrt_route_plan <= 1 + 1e-5).all(), (
             "not satisfying capacity constraint", partial_sum_wrt_route_plan, partial_sum_wrt_route_plan.max())
 
-    def get_costs(self, rec, get_context=False, check_full_feasibility=False, out_reward=False, penalty_factor=1.0, penalty_normalize=False, seperate_obj_penalty=False, non_linear=None):
+    def get_costs(self, rec, get_context=False, check_full_feasibility=False, out_reward=False, penalty_factor=1.0,
+                  penalty_normalize=False, seperate_obj_penalty=False, non_linear=None, wo_node_penalty=False, wo_tour_penalty =False):
 
         # preprocess: make it with dummy depot
         pomo_size = rec.size(0) // self.batch_size
