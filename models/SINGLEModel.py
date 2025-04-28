@@ -9,7 +9,7 @@ import numpy as np
 from utils import loss_edges, clip_grad_norms, dummify, get_previous_nodes, rec2sol
 import time
 import pdb
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple, List
 __all__ = ['SINGLEModel']
 
 
@@ -167,7 +167,7 @@ class SINGLEModel(nn.Module):
 
     def forward(self, state, solver="construction", selected=None, pomo = False, candidate_feature=None,
                 feasible_start = None, return_probs=False, require_entropy=False, fixed_action = None, use_LoRA=False,
-                use_predicted_PI_mask=False, no_select_prob=False, EAS_incumbent_action=None):
+                use_predicted_PI_mask=False, no_select_prob=False, EAS_incumbent_action=None, only_critic=False):
 
         if solver == "construction":
             batch_size = state.BATCH_IDX.size(0)
@@ -301,6 +301,7 @@ class SINGLEModel(nn.Module):
             else:
                 h_em_final = self.kopt_encoder(depot_feature, node_feature, use_LoRA=use_LoRA, route_attn=aux_scores)
 
+            if only_critic: return h_em_final
 
             # # merge three embeddings
             # h_em_final = torch.cat([node_embedding, node_supplement_embedding, h_pos], -1)
@@ -325,7 +326,7 @@ class SINGLEModel(nn.Module):
 
             # assert (visited_time == visited_time_clone).all()
             if require_entropy:
-                return action, log_ll, entropy, improvement_method
+                return action, log_ll, entropy, improvement_method, h_em_final
             else:
                 return action, log_ll, improvement_method
 
@@ -1982,4 +1983,186 @@ def sample_gumbel(t_like, eps=1e-10):
     return -torch.log(-torch.log(u))
 
 
+##############Critic in NCS#############
+# copy from https://github.com/dtkon/PDP-NCS
+class SkipConnection(nn.Module):
+    def __init__(self, module: nn.Module) -> None:
+        super().__init__()
+        self.module = module
 
+    __call__: Callable[['SkipConnection', torch.Tensor], torch.Tensor]
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return input + self.module(input)
+
+class MultiHeadSelfAttention(nn.Module):
+    def __init__(self, n_heads: int, input_dim: int) -> None:
+        super().__init__()
+        self.MHA = MultiHeadAttention(
+            n_heads, input_dim, input_dim, input_dim, input_dim
+        )
+
+    __call__: Callable[..., torch.Tensor]
+
+    def forward(self, q: torch.Tensor) -> torch.Tensor:
+        return self.MHA(q, q, q)
+
+class Normalization(nn.Module):
+    def __init__(self, input_dim: int, normalization: str) -> None:
+        super().__init__()
+
+        self.normalization = normalization
+
+        if self.normalization != 'layer':
+            normalizer_class = {'batch': nn.BatchNorm1d, 'instance': nn.InstanceNorm1d}[
+                normalization
+            ]
+            self.normalizer = normalizer_class(input_dim, affine=True)
+
+        # Normalization by default initializes affine parameters with bias 0 and weight unif(0,1) which is too large!
+        # self.init_parameters()
+
+    def init_parameters(self) -> None:
+
+        for name, param in self.named_parameters():
+            stdv = 1.0 / math.sqrt(param.size(-1))
+            param.data.uniform_(-stdv, stdv)
+
+    __call__: Callable[..., torch.Tensor]
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if self.normalization == 'layer':
+            return (input - input.mean((1, 2)).view(-1, 1, 1)) / torch.sqrt(
+                input.var((1, 2)).view(-1, 1, 1) + 1e-05
+            )
+        elif self.normalization == 'batch':
+            return self.normalizer(input.view(-1, input.size(-1))).view(*input.size())
+        elif self.normalization == 'instance':
+            return self.normalizer(input.permute(0, 2, 1)).permute(0, 2, 1)
+        else:
+            assert False, "Unknown normalizer type"
+
+class CriticEncoder(nn.Sequential):
+    def __init__(
+        self, n_heads: int, input_dim: int, feed_forward_hidden: int, normalization: str
+    ) -> None:
+        super().__init__(
+            SkipConnection(MultiHeadSelfAttention(n_heads, input_dim)),
+            Normalization(input_dim, normalization),
+            SkipConnection(
+                nn.Sequential(
+                    nn.Linear(input_dim, feed_forward_hidden),
+                    nn.ReLU(inplace=True),
+                    nn.Linear(
+                        feed_forward_hidden,
+                        input_dim,
+                    ),
+                )
+                if feed_forward_hidden > 0
+                else nn.Linear(input_dim, input_dim)
+            ),
+            Normalization(input_dim, normalization),
+        )
+
+class CriticDecoder(nn.Module):
+    def __init__(self, input_dim: int) -> None:
+        super().__init__()
+        self.input_dim = input_dim
+
+        self.project_graph = nn.Linear(self.input_dim, self.input_dim // 2)
+
+        self.project_node = nn.Linear(self.input_dim, self.input_dim // 2)
+
+        self.MLP = MLP(input_dim + 1, input_dim)
+
+    __call__: Callable[..., torch.Tensor]
+
+    def forward(self, y: torch.Tensor, best_cost: torch.Tensor) -> torch.Tensor:
+
+        # h_wave: (batch_size, graph_size+1, input_size)
+        mean_pooling = y.mean(1)  # mean Pooling (batch_size, input_size)
+        graph_feature: torch.Tensor = self.project_graph(mean_pooling)[
+            :, None, :
+        ]  # (batch_size, 1, input_dim/2)
+        node_feature: torch.Tensor = self.project_node(
+            y
+        )  # (batch_size, graph_size+1, input_dim/2)
+
+        # pass through value_head, get estimated value
+        fusion = node_feature + graph_feature.expand_as(
+            node_feature
+        )  # (batch_size, graph_size+1, input_dim/2)
+
+        fusion_feature = torch.cat(
+            (
+                fusion.mean(1),
+                fusion.max(1)[0],  # max_pooling
+                best_cost.to(y.device),
+            ),
+            -1,
+        )  # (batch_size, input_dim + 1)
+
+        value = self.MLP(fusion_feature)
+
+        return value
+
+class Critic_N2S(nn.Module):
+    def __init__(
+        self,
+        embedding_dim: int,
+        ff_hidden_dim: int,
+        n_heads: int,
+        n_layers: int,
+        normalization: str,
+    ) -> None:
+
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.ff_hidden_dim = ff_hidden_dim
+        self.n_heads = n_heads
+        self.n_layers = n_layers
+        self.normalization = normalization
+        self.encoder = nn.Sequential(
+            *(
+                CriticEncoder(
+                    self.n_heads,
+                    self.embedding_dim,
+                    self.ff_hidden_dim,
+                    self.normalization,
+                )
+                for _ in range(1)
+            )
+        )
+
+        self.decoder = CriticDecoder(self.embedding_dim)
+
+    __call__: Callable[..., Tuple[torch.Tensor, torch.Tensor]]
+
+    def forward(
+        self, h_wave: torch.Tensor, best_cost: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        y = self.encoder(h_wave.detach())
+        baseline_value = self.decoder(y, best_cost)
+
+        return baseline_value.detach().squeeze(), baseline_value.squeeze()
+
+class Critic_Construct(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.trust_degree = nn.Parameter(torch.tensor(0.0))
+
+    __call__: Callable[..., Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+
+    def forward(
+        self, obj_of_n2s: List[torch.Tensor], bl_val_detached_list: List[torch.Tensor]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        bl_construct = torch.stack(obj_of_n2s) - self.trust_degree * torch.stack(
+            bl_val_detached_list
+        )
+        return (
+            bl_construct.mean(0).detach(),
+            bl_construct.mean(0),
+            torch.tensor(self.trust_degree),
+        )

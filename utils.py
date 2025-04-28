@@ -570,6 +570,8 @@ class metric_logger:
             "reg_reward": AverageMeter(),  # reg to jump
             "bonus_reward": AverageMeter(),  # bonus to explore e-feasible
             "loss": AverageMeter(),
+            "critic_loss": AverageMeter(),
+            "actor_loss": AverageMeter(),
             "large_model_loss": AverageMeter(),
             "lora_loss": AverageMeter(),
             "sol_infeasible_rate": AverageMeter(), # best during improvement
@@ -590,6 +592,7 @@ class metric_logger:
             "improvement_value": AverageMeter(),
             "construct_RL_loss": AverageMeter(),
             "diversity_loss": AverageMeter(),
+            "critic_loss": AverageMeter(),
             "is_improved": AverageMeter(),
             "imitation_loss": AverageMeter(),
             "sol_infeasible_rate": AverageMeter(),

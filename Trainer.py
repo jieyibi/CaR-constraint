@@ -23,7 +23,7 @@ from torch.optim.lr_scheduler import MultiStepLR as Scheduler
 from tensorboard_logger import Logger as TbLogger
 from sklearn.metrics import confusion_matrix
 from utils import *
-from models.SINGLEModel import SINGLEModel
+from models.SINGLEModel import SINGLEModel, Critic_Construct, Critic_N2S
 # from sklearn.utils.class_weight import compute_class_weight
 # from torch.utils.data import DataLoader, DistributedSampler  # use pytorch dataloader
 # from sklearn.metrics import confusion_matrix, roc_auc_score
@@ -76,7 +76,27 @@ class Trainer:
             # [torch.zeros([self.args.train_batch_size, 40])]
             self.lambda_ = [torch.tensor(0.)] * trainer_params["constraint_number"] if trainer_params["subgradient"] else self.trainer_params["penalty_factor"]
             self.subgradient_lr = trainer_params["subgradient_lr"]
-            self.optimizer = Optimizer(self.model.parameters(), **self.optimizer_params['optimizer'])
+            if self.trainer_params["shared_critic"]:
+                self.critic_construct = Critic_Construct()
+                self.critic_improve = Critic_N2S(
+                    embedding_dim=128,
+                    ff_hidden_dim=128,
+                    n_heads=4,
+                    n_layers=3,
+                    normalization="layer",
+                )  # follow NCS
+                if self.args.multiple_gpu:
+                    self.critic_construct = DDP(self.critic_construct, device_ids=[rank], find_unused_parameters=True, static_graph=True)
+                    self.critic_improve = DDP(self.critic_improve, device_ids=[rank], find_unused_parameters=True, static_graph=True)
+                self.optimizer = Optimizer([{'params': self.model.parameters(), 'lr': args.lr}] +
+                                           [{'params': self.critic_construct.parameters(), 'lr': args.lr_critic_cons}] +
+                                           [{'params': self.critic_improve.parameters(), 'lr': args.lr_critic_impr}]
+                                           , **self.optimizer_params['optimizer'])
+                print(f'>> use shared critic: [CONS] {args.lr_critic_cons}; [IMPR] {args.lr_critic_impr}!')
+                num_param(self.critic_construct)
+                num_param(self.critic_improve)
+            else:
+                self.optimizer = Optimizer(self.model.parameters(), **self.optimizer_params['optimizer'])
         self.scheduler = Scheduler(self.optimizer, **self.optimizer_params['scheduler'])
         self.scaler = torch.cuda.amp.GradScaler()
         num_param(self.model)
@@ -142,7 +162,11 @@ class Trainer:
                 checkpoint_tmp = checkpoint
             try:
                 self.model.load_state_dict(checkpoint_tmp, strict=True)
+                if self.trainer_params["shared_critic"]:
+                    self.critic_construct(checkpoint["critic_construct"], strict=True)
+                    self.critic_improve(checkpoint["critic_improve"], strict=True)
             except:
+                # TODO: add critic
                 try:
                     # from single-gpu to multi-gpus
                     new_state_dict = OrderedDict()
@@ -151,7 +175,7 @@ class Trainer:
                         new_state_dict[name] = v
                     self.model.load_state_dict({**new_state_dict}, strict=True)
                 except:
-                                        # from multi-gpus to single-gpu
+                    # from multi-gpus to single-gpu
                     new_state_dict = OrderedDict()
                     for k, v in checkpoint_tmp.items():
                         name = k[7:]  # remove `module.`
@@ -273,7 +297,9 @@ class Trainer:
                         'optimizer_state_dict': self.optimizer.state_dict(),
                         'scheduler_state_dict': self.scheduler.state_dict(),
                         'result_log': self.result_log,
-                        'metrics_logger': self.metric_logger
+                        'metrics_logger': self.metric_logger,
+                        'critic_construct': self.critic_construct.state_dict() if self.trainer_params["shared_critic"] else {},
+                        'critic_improve': self.critic_improve.state_dict() if self.trainer_params["shared_critic"] else {},
                     }
                     torch.save(checkpoint_dict, '{}/epoch-{}.pt'.format(self.log_path, epoch))
 
@@ -630,7 +656,7 @@ class Trainer:
                 cons_log_prob = prob_list
             else:
                 cons_log_prob = None
-            improve_loss, improve_reward, select_idx, best_solution, best_reward, is_improved = self._improvement(env, self.trainer_params["epsilon"], cons_reward, batch_reward, weights, cons_log_prob)
+            improve_loss, improve_reward, select_idx, best_solution, best_reward, is_improved, bl_construct_detach, bl_construct  = self._improvement(env, self.trainer_params["epsilon"], cons_reward, batch_reward, weights, cons_log_prob)
             # if "TSP" not in self.args.problem: self.metric_logger.dummy_size.update(env.dummy_size, batch_size)
         else:
             improve_loss, improve_reward, select_idx, best_solution = torch.tensor(0.0), None, None, None
@@ -638,7 +664,7 @@ class Trainer:
 
         ###########################################Step & Return########################################
         if not self.model_params["improvement_only"]:
-            construct_loss = self._get_construction_output(infeasible, reward, prob_list, improve_reward, select_idx, probs_return_list, self.trainer_params["epsilon"])
+            construct_loss = self._get_construction_output(infeasible, reward, prob_list, improve_reward, select_idx, probs_return_list, self.trainer_params["epsilon"], bl_construct_detach, bl_construct)
             # add SL loss
             if self.model_params['pip_decoder'] and self.is_train_pip_decoder:
                 sl_loss_mean = sl_loss_list.mean()
@@ -1469,6 +1495,10 @@ class Trainer:
         use_LoRA = False
         memory = Memory()
         t = 0
+        if self.trainer_params["shared_critic"]:
+            bl_val_detached_list = []
+            bl_val_list = []
+            obj_of_impr = []
         if T_pi > 0:
             # step 1: rollout
             rec_list, context_list, context2_list, action_list, entropy = [], [], [], [], []
@@ -1546,9 +1576,17 @@ class Trainer:
                 state = (env, rec, context, context2, action)
                 if self.model_params["use_LoRA"] and t >= self.trainer_params["LoRA_begin_step"]: use_LoRA=True
                 with torch.amp.autocast(device_type="cuda", enabled=amp_training):
-                    action, log_lh, entro_p, improvement_method = self.model(state, solver="improvement", require_entropy=True, use_LoRA=use_LoRA)
+                    action, log_lh, entro_p, improvement_method, to_critic_ = self.model(state, solver="improvement", require_entropy=True, use_LoRA=use_LoRA)
+                    if self.trainer_params["shared_critic"]:
+                        baseline_val_detached, baseline_val = self.critic_improve(
+                            to_critic_, obj[:, 1:2]
+                        )
+                        bl_val_detached_list.append(baseline_val_detached)
+                        bl_val_list.append(baseline_val)
+                        obj_of_impr.append(obj[:, 0])
 
-                if self.model.training: memory.logprobs.append(log_lh.clone())
+                if self.model.training:
+                    memory.logprobs.append(log_lh.clone())
                 entropy.append(entro_p)
 
                 # state transient
@@ -1600,7 +1638,29 @@ class Trainer:
 
         # calculate improvement loss
         if self.model.training:
-            if self.trainer_params["baseline"] != "share":
+            if self.trainer_params["shared_critic"]:
+                bl_val_detached = torch.stack(bl_val_detached_list)
+                bl_val = torch.stack(bl_val_list)
+                # get td_traget value for critic
+                Reward_list = []
+                reward_reversed = memory.rewards[::-1]
+                R = self.critic_improve(self.model((env, rec, context, context2, action), solver="improvement", only_critic=True),
+                                        best_cost= obj[:, 1:2])[0]
+                for r in range(len(reward_reversed)):
+                    R = R * 0.999 + reward_reversed[r].sum(-1)
+                    Reward_list.append(R)
+                Reward = torch.stack(Reward_list[::-1], 0)
+                # td_delta = td_target - critic(old_states)
+                advantage = Reward - bl_val_detached
+                baseline_loss = ((bl_val - Reward) ** 2)
+                log_prob = torch.stack(memory.logprobs)
+                loss = - advantage * log_prob  # Minus Sign: To Increase REWARD
+                self.metric_logger.improve_metrics["actor_loss"].update(loss.mean().item(), batch_size)
+                self.metric_logger.improve_metrics["critic_loss"].update(baseline_loss.mean().item(), batch_size)
+                loss = loss + baseline_loss
+                # calculate baseline for construction
+                bl_construct_detach, bl_construct, trust_degree = self.critic_construct(obj_of_impr, bl_val_detached_list)
+            elif self.trainer_params["baseline"] != "share":
                 log_prob = torch.stack(memory.logprobs).view(T, batch_size, k)
                 reward = torch.stack(memory.rewards).sum(-1).view(T, batch_size, k) if T_pi == 0 else reward.view(T, batch_size, k)
                 baseline = 0. if self.trainer_params["baseline"] == "improve" else reward.mean(-1, keepdims=True)
@@ -1613,9 +1673,6 @@ class Trainer:
                 #     self.metric_logger.improve_metrics["loss"].update(loss.mean().item(), batch_size)
                 #     self.metric_logger.improve_metrics["large_model_loss"].update(loss[:self.trainer_params["LoRA_begin_step"]].mean().item(), batch_size)
                 #     self.metric_logger.improve_metrics["lora_loss"].update(loss[self.trainer_params["LoRA_begin_step"]:].mean().item(), batch_size)
-                # else:
-                loss_mean = loss.mean()
-                self.metric_logger.improve_metrics["loss"].update(loss_mean.item(), batch_size)
             else:
                 impr_log_prob = torch.stack(memory.logprobs).view(T, batch_size, k).sum(0)  # shape: (batch, k)
                 cons_log_prob = torch.gather(cons_log_prob, 1, select_idx)  # shape: (batch, k)
@@ -1625,8 +1682,8 @@ class Trainer:
                 min_cons_n_impr = score.min(dim=0)[0].view(batch_size, k, -1)[:, :, 1]  # shape: (batch, k)
                 advantage = min_cons_n_impr - min_cons_n_impr.float().mean(dim=1, keepdims=True)  # shape: (batch, k)
                 loss = - advantage * log_prob  # Minus Sign: To Increase REWARD # shape: (batch, k)
-                loss_mean = loss.mean()
-                self.metric_logger.improve_metrics["loss"].update(loss_mean.item(), batch_size)
+            loss_mean = loss.mean()
+            self.metric_logger.improve_metrics["loss"].update(loss_mean.item(), batch_size)
 
         # entropy
         entropy = torch.stack(entropy).mean().item()
@@ -1744,7 +1801,8 @@ class Trainer:
         memory.clear_memory()
         # print(f"!!!!!!!improved best: {remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size)[:3]}")
 
-        return loss_mean, improve_reward, select_idx, remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size), best_reward, is_improved
+        return loss_mean, improve_reward, select_idx, remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size), best_reward, is_improved, \
+                bl_construct_detach if self.trainer_params["shared_critic"] else None, bl_construct if self.trainer_params["shared_critic"] else None
 
     def _val_improvement(self, env, aug_factor, cons_reward, best_solution=None):
 
@@ -2343,7 +2401,7 @@ class Trainer:
             return aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, remove_dummy_depot_from_solution(
                 rec2sol(rec_best).view(batch_size // aug_factor, 1, -1), env.problem_size), is_improved
 
-    def _get_construction_output(self, infeasible, reward, prob_list=None, improve_reward=None, select_idx=None, probs_return_list=None, epsilon=None):
+    def _get_construction_output(self, infeasible, reward, prob_list=None, improve_reward=None, select_idx=None, probs_return_list=None, epsilon=None, bl_construct_detach=None, bl_construct=None):
         # Input.shape
         # infeasible: (batch, pomo)
         # reward (list or tensor): (batch, pomo)
@@ -2446,7 +2504,9 @@ class Trainer:
                         else:
                             reward = dist +  self.penalty_factor * (total_timeout_reward +  timeout_nodes_reward)  # (batch, pomo)
                 if not self.trainer_params["out_reward"] and self.trainer_params["fsb_reward_only"]: #ATTENTION
-                    if self.trainer_params["baseline"] == "group":
+                    if self.trainer_params["shared_critic"]:
+                        raise NotImplementedError
+                    elif self.trainer_params["baseline"] == "group":
                         feasible_reward_number = (infeasible==False).sum(-1)
                         feasible_reward_mean = (torch.where(infeasible, torch.zeros_like(dist_reward), dist_reward).sum(-1) / feasible_reward_number)[:,None]
                         baseline = feasible_reward_mean
@@ -2460,7 +2520,12 @@ class Trainer:
                     log_prob = torch.masked_select(prob_list.log().sum(dim=2), infeasible==False)
                     advantage = feasible_advantage
                 else:
-                    if self.trainer_params["baseline"] == "group":
+                    if self.trainer_params["shared_critic"]:
+                        reward = torch.gather(reward, dim=1, index=select_idx)
+                        log_prob = prob_list.log().sum(dim=2)  # (batch, pomo)
+                        log_prob = torch.gather(log_prob, dim=1, index=select_idx)
+                        advantage = (reward - bl_construct_detach.view(reward.size(0), -1)).detach()
+                    elif self.trainer_params["baseline"] == "group":
                         baseline = reward.float().mean(dim=1, keepdims=True)
                         advantage = reward - baseline  # (batch, pomo)
                         if self.trainer_params["bonus_for_construction"] and improve_reward is not None:
@@ -2489,6 +2554,11 @@ class Trainer:
                     else:
                         raise NotImplementedError
                 loss = - advantage * log_prob  # Minus Sign: To Increase REWARD
+                if self.trainer_params["shared_critic"]:
+                    self.metric_logger.construct_metrics["construct_RL_loss"].update(loss.mean().item(), batch_size)
+                    baseline_loss =  ((bl_construct.view(reward.size(0), -1) - reward.detach()) ** 2)
+                    self.metric_logger.construct_metrics["critic_loss"].update(baseline_loss.mean().item(),batch_size)
+                    loss = loss + baseline_loss
                 if self.trainer_params["diversity_loss"]:
                     self.metric_logger.construct_metrics["construct_RL_loss"].update(loss.mean().item(), batch_size)
                     if probs_return_list is None:
@@ -2497,7 +2567,10 @@ class Trainer:
                     else:
                         # implementation 2: increase diversity for the whole action probability distributions
                         diversity_loss = -(probs_return_list * probs_return_list.log()).sum(dim=2).mean(dim=-1) # b * p
-                    loss = loss - self.trainer_params['diversity_weight'] * diversity_loss  # Minus Sign: To Increase Diversity (i.e. Entropy)
+                    if self.trainer_params["shared_critic"]:
+                        loss = loss.mean() - self.trainer_params['diversity_weight'] * diversity_loss.mean()
+                    else:
+                        loss = loss - self.trainer_params['diversity_weight'] * diversity_loss  # Minus Sign: To Increase Diversity (i.e. Entropy)
                     self.metric_logger.construct_metrics["diversity_loss"].update(diversity_loss.mean().item(), batch_size)
                 loss_mean = loss.mean()
             self.metric_logger.construct_metrics["loss"].update(loss_mean.item(), batch_size)
@@ -2950,6 +3023,8 @@ class Trainer:
         if self.rank == 0 and self.trainer_params["diversity_loss"]:
             print(f'Diversity Loss: {self.metric_logger.construct_metrics["diversity_loss"].avg:.4f}, Constructive RL loss: {self.metric_logger.construct_metrics["construct_RL_loss"].avg:.4f}')
             if self.trainer_params["improve_steps"] > 0. and self.args.problem == "VRPBLTW" and self.trainer_params["reconstruct"]: print(f'[RC] Diversity Loss: {self.metric_logger.reconstruct_metrics["diversity_loss"].avg:.4f}, Constructive RL loss: {self.metric_logger.reconstruct_metrics["construct_RL_loss"].avg:.4f}')
+        if self.rank == 0 and self.trainer_params["shared_critic"]:
+            print(f'[construction] Actor Loss: {self.metric_logger.construct_metrics["construct_RL_loss"].avg:.4f}, Critic loss: {self.metric_logger.construct_metrics["critic_loss"].avg:.4f}, [improvement] Actor Loss: {self.metric_logger.improve_metrics["actor_loss"].avg:.4f}, Critic loss: {self.metric_logger.improve_metrics["critic_loss"].avg:.4f}')
 
     def _log_in_tb_logger(self, epoch): # train
 
@@ -2957,6 +3032,7 @@ class Trainer:
         self.tb_logger.log_value('construction/train_loss', self.metric_logger.construct_metrics["loss"].avg, epoch)
         self.tb_logger.log_value('construction/construct_RL_loss', self.metric_logger.construct_metrics["construct_RL_loss"].avg, epoch)
         self.tb_logger.log_value('construction/diversity_loss', self.metric_logger.construct_metrics["diversity_loss"].avg, epoch)
+        self.tb_logger.log_value('construction/critic_loss', self.metric_logger.construct_metrics["critic_loss"].avg, epoch)
         self.tb_logger.log_value('construction/max_vehicle_number', self.metric_logger.dummy_size.avg, epoch)
         self.tb_logger.log_value('construction/is_improved', self.metric_logger.construct_metrics["is_improved"].avg, epoch)
         self.tb_logger.log_value('construction/imitation_loss', self.metric_logger.construct_metrics["imitation_loss"].avg, epoch)
@@ -3005,6 +3081,8 @@ class Trainer:
             self.tb_logger.log_value('improvement/train_reg_reward', self.metric_logger.improve_metrics["reg_reward"].avg, epoch)
             self.tb_logger.log_value('improvement/train_bonus_reward', self.metric_logger.improve_metrics["bonus_reward"].avg, epoch)
             self.tb_logger.log_value('improvement/train_loss', self.metric_logger.improve_metrics["loss"].avg, epoch)
+            self.tb_logger.log_value('improvement/actor_loss', self.metric_logger.improve_metrics["actor_loss"].avg, epoch)
+            self.tb_logger.log_value('improvement/critic_loss', self.metric_logger.improve_metrics["critic_loss"].avg, epoch)
             self.tb_logger.log_value('improvement/entropy', self.metric_logger.improve_metrics["entropy"].avg, epoch)
             try:
                 self.tb_logger.log_value('improvement_feasibility/solution_infeasible_rate', self.metric_logger.improve_metrics["sol_infeasible_rate"].avg , epoch)
@@ -3072,6 +3150,7 @@ class Trainer:
             'construction/train_loss': self.metric_logger.construct_metrics["loss"].avg,
             'construction/construct_RL_loss': self.metric_logger.construct_metrics["construct_RL_loss"].avg,
             'construction/diversity_loss': self.metric_logger.construct_metrics["diversity_loss"].avg,
+            'construction/critic_loss': self.metric_logger.construct_metrics["critic_loss"].avg,
             'construction/is_improved': self.metric_logger.construct_metrics["is_improved"].avg,
             'construction/imitation_loss': self.metric_logger.construct_metrics["imitation_loss"].avg,
             'construction/max_vehicle_number': self.metric_logger.dummy_size.avg,
@@ -3131,7 +3210,9 @@ class Trainer:
                 'improvement/train_improve_reward': self.metric_logger.improve_metrics["improve_reward"].avg,
                 'improvement/train_reg_reward': self.metric_logger.improve_metrics["reg_reward"].avg,
                 'improvement/train_bonus_reward': self.metric_logger.improve_metrics["bonus_reward"].avg,
-                'improvement/train_loss': self.metric_logger.improve_metrics["loss"].avg,
+                'improvement/actor_loss': self.metric_logger.improve_metrics["loss"].avg,
+                'improvement/critic_loss': self.metric_logger.improve_metrics["actor_loss"].avg,
+                'improvement/critic_loss': self.metric_logger.improve_metrics["critic_loss"].avg,
                 'improvement/entropy': self.metric_logger.improve_metrics["entropy"].avg,
                 'improvement_feasibility/solution_infeasible_rate': self.metric_logger.improve_metrics["sol_infeasible_rate"].avg,
                 'improvement_feasibility/instance_infeasible_rate': self.metric_logger.improve_metrics["ins_infeasible_rate"].avg,
