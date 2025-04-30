@@ -163,8 +163,8 @@ class Trainer:
             try:
                 self.model.load_state_dict(checkpoint_tmp, strict=True)
                 if self.trainer_params["shared_critic"]:
-                    self.critic_construct(checkpoint["critic_construct"], strict=True)
-                    self.critic_improve(checkpoint["critic_improve"], strict=True)
+                    self.critic_construct.load_state_dict(checkpoint["critic_construct"], strict=True)
+                    self.critic_improve.load_state_dict(checkpoint["critic_improve"], strict=True)
             except:
                 # TODO: add critic
                 try:
@@ -1644,15 +1644,18 @@ class Trainer:
                 # get td_traget value for critic
                 Reward_list = []
                 reward_reversed = memory.rewards[::-1]
+                reward_reversed = [r / 1000. for r in reward_reversed]
                 R = self.critic_improve(self.model((env, rec, context, context2, action), solver="improvement", only_critic=True),
                                         best_cost= obj[:, 1:2])[0]
+                R = R / 1000.
                 for r in range(len(reward_reversed)):
                     R = R * 0.999 + reward_reversed[r].sum(-1)
                     Reward_list.append(R)
                 Reward = torch.stack(Reward_list[::-1], 0)
                 # td_delta = td_target - critic(old_states)
-                advantage = Reward - bl_val_detached
-                baseline_loss = ((bl_val - Reward) ** 2)
+                advantage = (Reward - bl_val_detached/1000.).detach()
+                # print(Reward.mean(), bl_val_detached.mean(), advantage.mean())
+                baseline_loss = (((bl_val/1000. - Reward)) ** 2)
                 log_prob = torch.stack(memory.logprobs)
                 loss = - advantage * log_prob  # Minus Sign: To Increase REWARD
                 self.metric_logger.improve_metrics["actor_loss"].update(loss.mean().item(), batch_size)
@@ -2524,7 +2527,8 @@ class Trainer:
                         reward = torch.gather(reward, dim=1, index=select_idx)
                         log_prob = prob_list.log().sum(dim=2)  # (batch, pomo)
                         log_prob = torch.gather(log_prob, dim=1, index=select_idx)
-                        advantage = (reward - bl_construct_detach.view(reward.size(0), -1)).detach()
+                        advantage = (reward - bl_construct_detach.view(reward.size(0), -1)).detach() / 1000.
+                        # print(reward.mean(), bl_construct_detach.mean(), advantage.mean())
                     elif self.trainer_params["baseline"] == "group":
                         baseline = reward.float().mean(dim=1, keepdims=True)
                         advantage = reward - baseline  # (batch, pomo)
@@ -2556,7 +2560,7 @@ class Trainer:
                 loss = - advantage * log_prob  # Minus Sign: To Increase REWARD
                 if self.trainer_params["shared_critic"]:
                     self.metric_logger.construct_metrics["construct_RL_loss"].update(loss.mean().item(), batch_size)
-                    baseline_loss =  ((bl_construct.view(reward.size(0), -1) - reward.detach()) ** 2)
+                    baseline_loss =  (((bl_construct.view(reward.size(0), -1) - reward.detach()) / 1000.) ** 2)
                     self.metric_logger.construct_metrics["critic_loss"].update(baseline_loss.mean().item(),batch_size)
                     loss = loss + baseline_loss
                 if self.trainer_params["diversity_loss"]:
