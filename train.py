@@ -238,8 +238,8 @@ if __name__ == "__main__":
     parser.add_argument('--model_save_interval', type=int, default=50)
 
     # PIP
-    parser.add_argument("--generate_PI_mask", type=bool, default=False)
-    parser.add_argument('--use_real_PI_mask', type=bool, default=False, help="whether to use PI masking")
+    parser.add_argument("--generate_PI_mask", type=bool, default=True)
+    parser.add_argument('--use_real_PI_mask', type=bool, default=True, help="whether to use PI masking")
     parser.add_argument('--pip_step', type=int, default=1)
     parser.add_argument('--pip_decoder', action='store_true', default=False)
     parser.add_argument('--lazy_pip_model', type=bool, default=False)
@@ -289,7 +289,7 @@ if __name__ == "__main__":
     parser.add_argument('--imitation_loss_weight', type=float, default=1.)
 
     # improvement
-    parser.add_argument('--improvement_only', type=bool, default=False)
+    parser.add_argument('--improvement_only', type=bool, default=True)
     parser.add_argument('--improvement_method', type=str, default="kopt", choices=["rm_n_insert", "kopt", "all"])
     parser.add_argument('--boundary', type=float, default=0.5)
     parser.add_argument('--insert_before', type=bool, default=True)
@@ -304,8 +304,8 @@ if __name__ == "__main__":
     parser.add_argument('--val_init_sol_strategy', type=str, default="POMO", choices=["random", "greedy_feasible", "random_feasible", "POMO"])
     # parser.add_argument('--POMO_checkpoint', type=str, default="./results/20241020_210610_VRPBLTW_rmPOMOstart_soft_backhaulSoft_penaltyWeight1/epoch-5000.pt")
     # parser.add_argument('--POMO_checkpoint', type=str, default="../PIP-constraint/POMO+PIP/pretrained/TSPTW/tsptw50_hard/POMO_star_PIP/epoch-10000.pt")
-    # parser.add_argument('--POMO_checkpoint', type=str, default="../PIP-constraint/POMO+PIP/pretrained/TSPTW/tsptw50_hard/POMO_star_PIP/epoch-10000.pt")
-    parser.add_argument('--POMO_checkpoint', type=str, default="../PIP-constraint/POMO+PIP/pretrained/TSPTW/tsptw50_hard/POMO_star/epoch-10000.pt")
+    parser.add_argument('--POMO_checkpoint', type=str, default="../PIP-constraint/POMO+PIP/pretrained/TSPTW/tsptw50_hard/POMO_star_PIP/epoch-10000.pt")
+    # parser.add_argument('--POMO_checkpoint', type=str, default="../PIP-constraint/POMO+PIP/pretrained/TSPTW/tsptw50_hard/POMO_star/epoch-10000.pt")
     parser.add_argument('--max_dummy_size', type=int, default=18)
     parser.add_argument('--improve_start_when_dummy_ok', type=bool, default=False)
     parser.add_argument('--improve_steps', type=int, default=5)
@@ -336,7 +336,7 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=2023)
     parser.add_argument('--log_dir', type=str, default="./results")
     parser.add_argument('--no_cuda', action='store_true')
-    parser.add_argument('--gpu_id', type=str, default="0")
+    parser.add_argument('--gpu_id', type=str, default="1")
     parser.add_argument('--world_size', type=int, default=1)
     parser.add_argument("--multiple_gpu", type=bool, default=False)
     parser.add_argument('--occ_gpu', type=float, default=0., help="occupy (X)% GPU memory in advance, please use sparingly.")
@@ -369,8 +369,8 @@ if __name__ == "__main__":
     # note = "_TSPTW100_Hard_rmPOMOstart_Soft_womask_withPenalty_varyN_construction_only"
     # note = "_TSPTW50_rmPOMOstart_Soft_sperateModel_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP"
     # note = "_TSPTW50_Hard_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP"
-    note = "_TSPTW50Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL"
-    # note = "_TSPTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_Impr10sampledFromPOMOstar_Impro5Val20_AMP_kopt"
+    # note = "_TSPTW50Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL"
+    note = "_TSPTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_Impr10sampledFromPIP_Impro5Val20_AMP_kopt"
     # note = "_TSPDL100Hard_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL_PIP"
     # note = "_TSPTW100Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL_PIP-D"
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_tw+capacity"
