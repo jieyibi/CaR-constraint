@@ -1656,6 +1656,7 @@ class Trainer:
                 advantage = (Reward - bl_val_detached/1000.).detach()
                 # print(Reward.mean(), bl_val_detached.mean(), advantage.mean())
                 baseline_loss = (((bl_val/1000. - Reward)) ** 2)
+                # print(bl_val.mean(), Reward.mean(), baseline_loss.mean())
                 log_prob = torch.stack(memory.logprobs)
                 loss = - advantage * log_prob  # Minus Sign: To Increase REWARD
                 self.metric_logger.improve_metrics["actor_loss"].update(loss.mean().item(), batch_size)
@@ -2561,6 +2562,7 @@ class Trainer:
                 if self.trainer_params["shared_critic"]:
                     self.metric_logger.construct_metrics["construct_RL_loss"].update(loss.mean().item(), batch_size)
                     baseline_loss =  (((bl_construct.view(reward.size(0), -1) - reward.detach()) / 1000.) ** 2)
+                    # print(bl_construct.mean(), reward.mean(), baseline_loss.mean())
                     self.metric_logger.construct_metrics["critic_loss"].update(baseline_loss.mean().item(),batch_size)
                     loss = loss + baseline_loss
                 if self.trainer_params["diversity_loss"]:
