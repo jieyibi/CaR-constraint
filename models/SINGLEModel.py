@@ -2135,34 +2135,43 @@ class Critic_N2S(nn.Module):
         )
 
         self.decoder = CriticDecoder(self.embedding_dim)
+        self.decoder_penalty = CriticDecoder(self.embedding_dim)
 
     __call__: Callable[..., Tuple[torch.Tensor, torch.Tensor]]
 
     def forward(
-        self, h_wave: torch.Tensor, best_cost: torch.Tensor
+        self, h_wave: torch.Tensor, best_cost: torch.Tensor, best_penalty: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
         y = self.encoder(h_wave.detach())
         baseline_value = self.decoder(y, best_cost)
+        baseline_value_penalty = self.decoder_penalty(y, best_penalty)
 
-        return baseline_value.detach().squeeze(), baseline_value.squeeze()
+        return (baseline_value.detach().squeeze(), baseline_value_penalty.detach().squeeze(),
+                baseline_value.squeeze(), baseline_value_penalty.squeeze())
 
 class Critic_Construct(nn.Module):
     def __init__(self) -> None:
         super().__init__()
 
         self.trust_degree = nn.Parameter(torch.tensor(0.0))
+        self.trust_degree_penalty = nn.Parameter(torch.tensor(0.0))
 
     __call__: Callable[..., Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
 
     def forward(
-        self, obj_of_n2s: List[torch.Tensor], bl_val_detached_list: List[torch.Tensor]
+        self, obj_of_impr: List[torch.Tensor],
+            penalty_of_impr: List[torch.Tensor],
+            bl_val_detached_list: List[torch.Tensor],
+            bl_val_detached_list_penalty: List[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        bl_construct = torch.stack(obj_of_n2s) - self.trust_degree * torch.stack(
+        bl_construct = torch.stack(obj_of_impr) - self.trust_degree * torch.stack(
             bl_val_detached_list
+        ) + torch.stack(penalty_of_impr) - self.trust_degree_penalty * torch.stack(
+            bl_val_detached_list_penalty
         )
         return (
             bl_construct.mean(0).detach(),
             bl_construct.mean(0),
-            torch.tensor(self.trust_degree),
+            torch.tensor([self.trust_degree, self.trust_degree_penalty]),
         )

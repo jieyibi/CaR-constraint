@@ -1496,9 +1496,12 @@ class Trainer:
         memory = Memory()
         t = 0
         if self.trainer_params["shared_critic"]:
-            bl_val_detached_list = []
-            bl_val_list = []
-            obj_of_impr = []
+            bl_val_detached_list, bl_val_detached_list_penalty = [], []
+            bl_val_list, bl_val_list_penalty = [], []
+            obj_of_impr, penalty_of_impr = [], []
+            best_penalty_ = out_node_penalty.sum(0) + out_penalty.sum(0)
+            best_obj_ = obj[:, 1].clone()
+
         if T_pi > 0:
             # step 1: rollout
             rec_list, context_list, context2_list, action_list, entropy = [], [], [], [], []
@@ -1578,12 +1581,17 @@ class Trainer:
                 with torch.amp.autocast(device_type="cuda", enabled=amp_training):
                     action, log_lh, entro_p, improvement_method, to_critic_ = self.model(state, solver="improvement", require_entropy=True, use_LoRA=use_LoRA)
                     if self.trainer_params["shared_critic"]:
-                        baseline_val_detached, baseline_val = self.critic_improve(
-                            to_critic_, obj[:, 1:2]
+                        baseline_val_detached, baseline_val_detached_p, baseline_val, baseline_val_p = self.critic_improve(
+                            to_critic_, obj[:, 1:2], best_penalty_.unsqueeze(-1)
                         )
                         bl_val_detached_list.append(baseline_val_detached)
+                        bl_val_detached_list_penalty.append(baseline_val_detached_p)
                         bl_val_list.append(baseline_val)
+                        bl_val_list_penalty.append(baseline_val_p)
                         obj_of_impr.append(obj[:, 0])
+                        penalty_of_impr.append(out_node_penalty.sum(0) + out_penalty.sum(0))
+                        best_penalty_ = torch.where((best_obj_ > obj[:, 1]), out_node_penalty.sum(0) + out_penalty.sum(0), best_penalty_)
+                        best_obj_ = obj[:, 1].clone()
 
                 if self.model.training:
                     memory.logprobs.append(log_lh.clone())
@@ -1640,22 +1648,25 @@ class Trainer:
         if self.model.training:
             if self.trainer_params["shared_critic"]:
                 bl_val_detached = torch.stack(bl_val_detached_list)
+                bl_val_detached_penalty = torch.stack(bl_val_detached_list_penalty)
                 bl_val = torch.stack(bl_val_list)
+                bl_val_penalty = torch.stack(bl_val_list_penalty)
                 # get td_traget value for critic
                 Reward_list = []
                 reward_reversed = memory.rewards[::-1]
-                reward_reversed = [r / 1000. for r in reward_reversed]
-                R = self.critic_improve(self.model((env, rec, context, context2, action), solver="improvement", only_critic=True),
-                                        best_cost= obj[:, 1:2])[0]
-                R = R / 1000.
+                reward_reversed = [r for r in reward_reversed]
+                best_penalty_ = torch.where((best_obj_ > obj[:, 1]), out_node_penalty.sum(0) + out_penalty.sum(0), best_penalty_)
+                R, P, _, _ = self.critic_improve(self.model((env, rec, context, context2, action), solver="improvement", only_critic=True),
+                                        best_cost= obj[:, 1:2], best_penalty=best_penalty_.unsqueeze(-1))
+                R = R + P
                 for r in range(len(reward_reversed)):
                     R = R * 0.999 + reward_reversed[r].sum(-1)
                     Reward_list.append(R)
                 Reward = torch.stack(Reward_list[::-1], 0)
                 # td_delta = td_target - critic(old_states)
-                advantage = (Reward - bl_val_detached/1000.).detach()
+                advantage = (Reward - (bl_val_detached + bl_val_detached_penalty)).detach()
                 # print(Reward.mean(), bl_val_detached.mean(), advantage.mean())
-                baseline_loss = (((bl_val/1000. - Reward)) ** 2)
+                baseline_loss = ((((bl_val + bl_val_penalty) - Reward)) ** 2)
                 # print(bl_val.mean(), Reward.mean(), baseline_loss.mean())
                 log_prob = torch.stack(memory.logprobs)
                 loss = - advantage * log_prob  # Minus Sign: To Increase REWARD
@@ -1663,7 +1674,8 @@ class Trainer:
                 self.metric_logger.improve_metrics["critic_loss"].update(baseline_loss.mean().item(), batch_size)
                 loss = loss + baseline_loss
                 # calculate baseline for construction
-                bl_construct_detach, bl_construct, trust_degree = self.critic_construct(obj_of_impr, bl_val_detached_list)
+                bl_construct_detach, bl_construct, trust_degree = self.critic_construct(obj_of_impr, penalty_of_impr,
+                                                                                        bl_val_detached_list, bl_val_detached_list_penalty)
             elif self.trainer_params["baseline"] != "share":
                 log_prob = torch.stack(memory.logprobs).view(T, batch_size, k)
                 reward = torch.stack(memory.rewards).sum(-1).view(T, batch_size, k) if T_pi == 0 else reward.view(T, batch_size, k)
@@ -2528,7 +2540,7 @@ class Trainer:
                         reward = torch.gather(reward, dim=1, index=select_idx)
                         log_prob = prob_list.log().sum(dim=2)  # (batch, pomo)
                         log_prob = torch.gather(log_prob, dim=1, index=select_idx)
-                        advantage = (reward - bl_construct_detach.view(reward.size(0), -1)).detach() / 1000.
+                        advantage = (reward - bl_construct_detach.view(reward.size(0), -1)).detach()
                         # print(reward.mean(), bl_construct_detach.mean(), advantage.mean())
                     elif self.trainer_params["baseline"] == "group":
                         baseline = reward.float().mean(dim=1, keepdims=True)
@@ -2561,7 +2573,7 @@ class Trainer:
                 loss = - advantage * log_prob  # Minus Sign: To Increase REWARD
                 if self.trainer_params["shared_critic"]:
                     self.metric_logger.construct_metrics["construct_RL_loss"].update(loss.mean().item(), batch_size)
-                    baseline_loss =  (((bl_construct.view(reward.size(0), -1) - reward.detach()) / 1000.) ** 2)
+                    baseline_loss =  (((bl_construct.view(reward.size(0), -1) - reward.detach())) ** 2)
                     # print(bl_construct.mean(), reward.mean(), baseline_loss.mean())
                     self.metric_logger.construct_metrics["critic_loss"].update(baseline_loss.mean().item(),batch_size)
                     loss = loss + baseline_loss
