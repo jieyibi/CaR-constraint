@@ -754,7 +754,7 @@ class val_metric_logger:
     def _log_output(self, trainer):
 
 
-        if trainer.tester_params["best_solution_path"] is not None:
+        if trainer.tester_params["refinement_history_path"] is not None:
             # if trainer.tester_params["refinement_history_path"] is not None:
             file_path = trainer.tester_params["refinement_history_path"]
             torch.save(self.reward_history, "rebut/" + file_path + "_reward.pt")
@@ -768,7 +768,7 @@ class val_metric_logger:
                 (r.item(), bool(f), s.tolist())
                 for r, f, s in zip(self.best_reward_all, self.best_feasible_all, self.best_solution_all)
             ]
-            with open(trainer.tester_params["best_solution_path"], 'wb') as f:
+            with open(trainer.tester_params["refinement_history_path"], 'wb') as f:
                 pickle.dump(all_pack, f, pickle.HIGHEST_PROTOCOL)
             print(f"Best solution saved to {trainer.tester_params['best_solution_path']}, size: {self.best_solution_all.size()}")
 
@@ -869,10 +869,10 @@ class val_metric_logger:
         else:
             gap = (no_aug_score - opt_sol) / opt_sol * 100
             aug_gap = (aug_score - opt_sol) / opt_sol * 100
-        torch.save(aug_score, "pomo_aug_score.pt")
-        torch.save(aug_feasible, "pomo_aug_feasible.pt")
-        torch.save(no_aug_score, "pomo_no_aug_score.pt")
-        torch.save(no_aug_feasible, "pomo_no_aug_feasible.pt")
+        # torch.save(aug_score, "pomo_aug_score.pt")
+        # torch.save(aug_feasible, "pomo_aug_feasible.pt")
+        # torch.save(no_aug_score, "pomo_no_aug_score.pt")
+        # torch.save(no_aug_feasible, "pomo_no_aug_feasible.pt")
         self.construct_metrics["no_aug_gap_list"] = round(gap.mean().item(), 4)
         self.construct_metrics["aug_gap_list"] = round(aug_gap.mean().item(), 4)
         # improvement

@@ -157,6 +157,13 @@ class Trainer:
                         name = k[7:]  # remove `module.`
                         new_state_dict[name] = v
                     self.model.load_state_dict({**new_state_dict}, strict=True)
+            # torch.save(
+            #     {
+            #         'epoch': checkpoint['epoch'],
+            #         'model_state_dict': checkpoint['model_state_dict']
+            #     },
+            #     "/home/jieyi/unified_solver_1/test/TSPTW100/20240914_001235_TSPTW100_Hard_rmPOMOstart_Soft_womask_withPenalty_varyN_construction_only/checkpoint-5000.pt"
+            # )
             self.start_epoch = 1 + checkpoint['epoch']
             self.scheduler.last_epoch = checkpoint['epoch'] - 1
             if self.trainer_params["load_optimizer"]:
@@ -1002,6 +1009,13 @@ class Trainer:
                         # shape: (batch, pomo)
                         state, reward, done, infeasible = env.step(selected, soft_constrained = False, backhaul_mask = "hard")
                 # Obtain the minimal feasible reward
+
+                if sample_size > 1:
+                    reward = reward.view(sample_size,-1, 1)
+                    infeasible = infeasible.view(sample_size,-1, 1)
+                    reward_masked = reward.masked_fill(infeasible, -1e10)
+                    reward = reward.max(dim=0)[0]
+                    infeasible = infeasible.all(dim=0)
                 self._supplement_construction(aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, aug_factor, infeasible, reward)
                 if self.rank==0: print(f"Rank {self.rank} >> val reconstruction time [w. mask]: ", time.time() - tik)
 
@@ -1322,7 +1336,7 @@ class Trainer:
                 pred_LIST = np.append(pred_LIST, output[0])
                 label_LIST = np.append(label_LIST, output[1])
 
-            if self.tester_params['best_solution_path'] is not None:
+            if self.tester_params['refinement_history_path'] is not None:
                 if episode == 0:
                     self.val_metric_logger.best_solution_all = self.val_metric_logger.best_solution
                     self.val_metric_logger.best_reward_all = self.val_metric_logger.best_reward
@@ -1807,11 +1821,14 @@ class Trainer:
             rec_best = rec.view(batch_size//aug_factor, aug_factor*pomo_size, -1)[torch.arange(batch_size//aug_factor), best_index, :].clone()
             # print(f"!!!!!!!constructed best: {remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size)[:3]}")
             is_improved = torch.zeros(batch_size//aug_factor).bool()
-            if self.tester_params["best_solution_path"] is not None:
+
+            if self.tester_params["refinement_history_path"] is not None:
                 tmp_obj = reshape_aug_view(obj[:, 0].clone(), batch_size, aug_factor, pomo_size)
+                rewardd = tmp_obj.unsqueeze(-1)
                 tmp_solution = reshape_aug_solution(remove_dummy_depot_from_solution(rec2sol(rec).unsqueeze(1), env.problem_size), batch_size, aug_factor, pomo_size).clone()
                 tmp_penalty = reshape_aug_view(out_penalty.sum(0) + out_node_penalty.sum(0), batch_size, aug_factor, pomo_size).clone()
                 tmp_feasible = reshape_aug_view((out_penalty.sum(0) + out_node_penalty.sum(0)) < 1e-5, batch_size, aug_factor, pomo_size).clone()
+                fsbb = tmp_feasible.unsqueeze(-1)
                 new_best_reward, new_feasible, new_best_solution = cal_best_aug_batch(
                     dist=tmp_obj.T,
                     solution=tmp_solution.transpose(0, 1),
@@ -1881,11 +1898,13 @@ class Trainer:
                 is_improved = (is_improved | index)
                 tmp_rec = rec.reshape(aug_factor, batch_size // aug_factor, pomo_size, -1).permute(1, 0, 2, 3).reshape(batch_size // aug_factor, aug_factor * pomo_size, -1)
                 rec_best[index] = tmp_rec[torch.arange(batch_size//aug_factor), best_index, :][index].clone()  # update best solution
-                if self.tester_params["best_solution_path"] is not None:
+                if self.tester_params["refinement_history_path"] is not None:
                     tmp_obj = reshape_aug_view(obj[:, 0].clone(), batch_size, aug_factor, pomo_size)
                     tmp_solution = reshape_aug_solution(remove_dummy_depot_from_solution(rec2sol(rec).unsqueeze(1), env.problem_size), batch_size, aug_factor,pomo_size).clone()
                     tmp_penalty = reshape_aug_view(out_penalty.sum(0) + out_node_penalty.sum(0), batch_size, aug_factor,pomo_size).clone()
                     tmp_feasible = reshape_aug_view((out_penalty.sum(0) + out_node_penalty.sum(0)) < 1e-5, batch_size, aug_factor,pomo_size).clone()
+                    rewardd = torch.cat([rewardd, tmp_obj.unsqueeze(-1)], dim=-1)
+                    fsbb = torch.cat([fsbb, tmp_feasible.unsqueeze(-1)], dim=-1)
                     new_best_reward, new_feasible, new_best_solution = cal_best_aug_batch(
                         dist=tmp_obj.T,
                         solution=tmp_solution.transpose(0, 1),
@@ -1998,6 +2017,9 @@ class Trainer:
 
             # end update
             # memory.clear_memory()
+
+            # torch.save(rewardd, "rewardd_car_pomo.pt")
+            # torch.save(fsbb, "fsb_car_pomo.pt")
 
             return aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size//aug_factor, 1, -1), env.problem_size), is_improved
 
@@ -2779,7 +2801,7 @@ class Trainer:
             if self.args.problem == "VRPBLTW" and self.trainer_params["reconstruct"]:
                 best_reward, best_index = (dist.reshape(batch_size, aug_factor*pomo_size)).min(-1)
                 best_solution = solution.reshape(batch_size, aug_factor*pomo_size, -1)[torch.arange(batch_size), best_index, :].clone()
-            elif self.tester_params["best_solution_path"] is not None:
+            elif self.tester_params["refinement_history_path"] is not None:
                 feasible_all = ~(infeasible.reshape(aug_factor * pomo_size, batch_size))
                 dist_ = - dist.reshape(aug_factor * pomo_size, batch_size).clone()
                 try:

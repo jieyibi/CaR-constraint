@@ -186,10 +186,14 @@ if __name__ == "__main__":
 
     # load
     parser.add_argument('--gpu_id', type=str, default="1")
-    parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/VRPBLTW50/20250120_174629_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_diversity_IL_co10/epoch-5000.pt")
+    parser.add_argument('--seed', type=int, default=2024)
+    # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/VRPBLTW50/20250120_174629_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_diversity_IL_co10/epoch-5000.pt")
     # parser.add_argument('--checkpoint', type=str, default="./test/VRPBLTW50/20250119_223349_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_N2S_diversity_IL_co10/epoch-5000.pt")
+    # parser.add_argument('--checkpoint', type=str, default="./results/20250125_060943_VRPBLTW50_rmPOMOstart_Soft_seperateModel_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_N2S_diversity_IL_co10/epoch-5000.pt")
+
     # parser.add_argument('--checkpoint', type=str, default="./test/VRPBLTW100/20250219_220016_VRPBLTW100_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprREALTop3Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_diversity_IL/epoch-5000.pt")
-    # parser.add_argument('--checkpoint', type=str, default="./test/VRPBLTW100/20250219_215131_VRPBLTW100_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprREALTop3Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1InsAfterN2S_diversity_IL/epoch-5000.pt")
+    parser.add_argument('--checkpoint', type=str, default="./test/VRPBLTW100/20250219_215131_VRPBLTW100_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprREALTop3Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1InsAfterN2S_diversity_IL/epoch-5000.pt")
+    # parser.add_argument('--checkpoint', type=str, default="./test/VRPBLTW100/20250503_064818_VRPBLTW100_rmPOMOstart_Soft_SepModel_GroupBaseline_ImprTop3Qual_Impro5Val20_AMP_warmstart_noregnobonus_N2S_diversity_IL/epoch-4880.pt")
     # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/20250103_110958_VRPBLTW100_rmPOMOstart_Hard_construction_only/epoch-5000.pt")
     # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/VRPBLTW100/20250103_110904_VRPBLTW100_rmPOMOstart_Soft_construction_only/epoch-5000.pt")
     parser.add_argument('--load_optimizer', type=bool, default=False)
@@ -203,8 +207,8 @@ if __name__ == "__main__":
     parser.add_argument('--decoder_layer_num', type=int, default=1, help="the number of MHA in decoder")
     parser.add_argument('--unified_encoder', type=bool, default=True)
     parser.add_argument('--unified_decoder', type=bool, default=False)
-    parser.add_argument('--n2s_decoder', type=bool, default=False)
-    parser.add_argument('--improvement_method', type=str, default="kopt", choices=["rm_n_insert", "kopt", "all"])
+    parser.add_argument('--n2s_decoder', type=bool, default=True)
+    parser.add_argument('--improvement_method', type=str, default="rm_n_insert", choices=["rm_n_insert", "kopt", "all"])
     parser.add_argument('--v_range', type=float, default=6.0, help='to control the entropy')
     parser.add_argument('--qkv_dim', type=int, default=16)
     parser.add_argument('--head_num', type=int, default=8)
@@ -340,7 +344,6 @@ if __name__ == "__main__":
 
 
     # settings (e.g., GPU)
-    parser.add_argument('--seed', type=int, default=2023)
     parser.add_argument('--log_dir', type=str, default="./results")
     parser.add_argument('--no_cuda', action='store_true')
     parser.add_argument('--world_size', type=int, default=1)

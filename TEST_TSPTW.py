@@ -160,11 +160,11 @@ if __name__ == "__main__":
     parser.add_argument('--pomo_start', type=bool, default=False)
     parser.add_argument('--pomo_feasible_start', type= bool, default=False)
     parser.add_argument('--fsb_start_delay', type=int, default=10000)
-    parser.add_argument('--val_dataset', type=str, nargs='+', default =["tsptw100_da_silva_uniform_varyN.pkl"]) # ["tsptw100_da_silva_uniform_varyN.pkl"]
+    parser.add_argument('--val_dataset', type=str, nargs='+', default =["tsptw50_da_silva_uniform.pkl"]) # ["tsptw100_da_silva_uniform_varyN.pkl"]
     parser.add_argument('--select_top_k_val', type=int, default=1)
     parser.add_argument('--select_top_k', type=int, default=10)
-    parser.add_argument('--improve_steps', type=int, default=5)
-    parser.add_argument('--validation_improve_steps', type=int, default= 1000)
+    parser.add_argument('--improve_steps', type=int, default=5 )
+    parser.add_argument('--validation_improve_steps', type=int, default=20)
     parser.add_argument('--enable_eas', type=bool, default=False)
     parser.add_argument('--iterations', type=int, default=200, help='Number of iterations for EAS')
     parser.add_argument('--iterations_impr', type=int, default=10, help='Number of iterations for EAS')
@@ -174,28 +174,30 @@ if __name__ == "__main__":
     # tester_params
     parser.add_argument('--eval_only', type=bool, default=True)
     parser.add_argument('--test_episodes', type=int, default=10000)
-    parser.add_argument('--test_batch_size', type=int, default=2000)
+    parser.add_argument('--test_batch_size', type=int, default=2500)
     parser.add_argument("--test_pomo_size", type=int, default=1)
-    # parser.add_argument('--test_dataset', type=str, default=["tsptw100_da_silva_uniform_varyN.pkl"])
     parser.add_argument('--test_dataset', type=str, default=["tsptw50_da_silva_uniform.pkl"])
+    # parser.add_argument('--test_dataset', type=str, default=["tsptw50_da_silva_uniform.pkl"])
     # parser.add_argument('--test_dataset', type=str, nargs='+', default=['/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n120-k6.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n172-k51.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n157-k13.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n134-k13.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n190-k8.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n200-k36.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n139-k10.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n228-k23.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n219-k73.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n106-k14.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n247-k50.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n195-k51.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n129-k18.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n209-k16.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n251-k28.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n162-k11.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n125-k30.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n115-k10.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n167-k10.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n110-k13.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n153-k22.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n148-k46.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n176-k26.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n186-k15.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n101-k25.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n143-k7.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n181-k23.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n237-k14.pkl'])#["tsptw100_da_silva_uniform.pkl"]
     parser.add_argument('--is_lib', type=bool, default=False)
     parser.add_argument('--test_z_sample_size', type=int, default=0)
-    parser.add_argument('--eval_type', type=str, default="argmax", choices=["argmax", "softmax"])
+    parser.add_argument('--eval_type', type=str, default="softmax", choices=["argmax", "softmax"])
     parser.add_argument('--sample_size', type=int, default = 1)
     parser.add_argument('--aux_mask', type=bool, default=False, help="only activates when problem == VRPBLTW")
 
 
     # load
-    parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/TSPTW50/20250125_053633_TSPTW50Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_Impr[POMO5]_Impro5Val20_AMP_noregnobonus_kopt/epoch-5000.pt")
-
+    # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/TSPTW50/20250125_053633_TSPTW50Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_Impr[POMO5]_Impro5Val20_AMP_noregnobonus_kopt/epoch-5000.pt")
+    # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/TSPTW100/20240928_224256_TSPTW100_Hard_varyN_pip-d_m0/epoch-10000.pt")
     # parser.add_argument('--checkpoint', type=str, default="./test/TSPTW50/20250122_163049_TSPTW50Hard_rmPOMOstart_Soft_construction_only/epoch-5000.pt")
     # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/TSPTW50/epoch-10000.pt")
+    #CaR-POMO
     # parser.add_argument('--checkpoint', type=str, default="./test/TSPTW50/20250113_215150_TSPTW50Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL/epoch-5000.pt")
-    # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/TSPTW100/20250118_030220_TSPTW100Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL/epoch-5000.pt")
-    # parser.add_argument('--checkpoint', type=str, default="test/TSPTW50/20250224_001641_TSPTW50Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL_[PIP]/epoch-5000.pt")
+    # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/TSPTW100/20250118_030220_TSPTW100Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL/epoch-1600.pt")
+    # CaR-PIP
+    parser.add_argument('--checkpoint', type=str, default="test/TSPTW50/20250224_001641_TSPTW50Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL_[PIP]/epoch-5000.pt")
     # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/TSPTW100/20250303_150240_TSPTW100Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL_PIPLoadFrom705/epoch-5000.pt")
-    parser.add_argument('--gpu_id', type=str, default="3")
+    parser.add_argument('--gpu_id', type=str, default="1")
     parser.add_argument('--load_optimizer', type=bool, default=False)
     parser.add_argument("--generate_PI_mask", type=bool, default=True)
     parser.add_argument('--use_real_PI_mask', type=bool, default=True, help="whether to use PI masking")
@@ -207,7 +209,7 @@ if __name__ == "__main__":
     parser.add_argument('--encoder_layer_num', type=int, default=6, help="the number of MHA in encoder")
     parser.add_argument("--impr_encoder_start_idx", type=int, default=0)
     parser.add_argument('--decoder_layer_num', type=int, default=1, help="the number of MHA in decoder")
-    parser.add_argument('--unified_encoder', type=bool, default=False)
+    parser.add_argument('--unified_encoder', type=bool, default=True)
     parser.add_argument('--unified_decoder', type=bool, default=False)
     parser.add_argument('--n2s_decoder', type=bool, default=False)
     parser.add_argument('--v_range', type=float, default=6.0, help='to control the entropy')
@@ -308,7 +310,7 @@ if __name__ == "__main__":
     parser.add_argument('--imitation_loss_weight', type=float, default=1.)
 
     # improvement
-    parser.add_argument('--improvement_only', type=bool, default=True)
+    parser.add_argument('--improvement_only', type=bool, default=False)
     parser.add_argument('--improvement_method', type=str, default="kopt", choices=["rm_n_insert", "kopt", "all"])
     parser.add_argument('--boundary', type=float, default=0.5)
     parser.add_argument('--insert_before', type=bool, default=True)
