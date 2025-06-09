@@ -154,12 +154,12 @@ if __name__ == "__main__":
     parser.add_argument('--tw_duration', type=str, default="1020", choices=["1020", "75100", "2550", "5075", "random", "curriculum"])
     parser.add_argument('--dl_percent', type=int, default=90, help="percentage of nodes that DL < total demand")
     parser.add_argument('--random_delta_t', type=float, default=0)
-    parser.add_argument('--problem_size', type=int, default=50)
-    parser.add_argument('--pomo_size', type=int, default=50, help="the number of start node, should <= problem size")
+    parser.add_argument('--problem_size', type=int, default=100)
+    parser.add_argument('--pomo_size', type=int, default=100, help="the number of start node, should <= problem size")
     parser.add_argument('--pomo_start', type=bool, default=False)
     parser.add_argument('--pomo_feasible_start', type= bool, default=False)
     parser.add_argument('--fsb_start_delay', type=int, default=10000)
-    parser.add_argument('--val_dataset', type=str, nargs='+', default =["tsptw50_da_silva_uniform.pkl"]) # ["tsptw100_da_silva_uniform_varyN.pkl"]
+    parser.add_argument('--val_dataset', type=str, nargs='+', default =["tsptw100_da_silva_uniform_varyN.pkl"]) # ["tsptw100_da_silva_uniform_varyN.pkl"]
     parser.add_argument('--enable_eas', type=bool, default=False)
     parser.add_argument('--iterations', type=int, default=200, help='Number of iterations for EAS')
     parser.add_argument('--iterations_impr', type=int, default=20, help='Number of iterations for EAS')
@@ -174,7 +174,7 @@ if __name__ == "__main__":
     parser.add_argument('--test_dataset', type=str, nargs='+', default=None)#["tsptw100_da_silva_uniform.pkl"]
     parser.add_argument('--test_z_sample_size', type=int, default=0)
     parser.add_argument('--is_lib', type=bool, default=False)
-    parser.add_argument('--eval_type', type=str, default="argmax", choices=["argmax", "softmax"])
+    parser.add_argument('--eval_type', type=str, default="softmax", choices=["argmax", "softmax"])
     parser.add_argument('--sample_size', type=int, default = 1)
     parser.add_argument('--aux_mask', type=bool, default=False, help="only activates when problem == VRPBLTW")
 
@@ -187,7 +187,7 @@ if __name__ == "__main__":
     parser.add_argument('--decoder_layer_num', type=int, default=1, help="the number of MHA in decoder")
     parser.add_argument('--unified_encoder', type=bool, default=True)
     parser.add_argument('--unified_decoder', type=bool, default=False)
-    parser.add_argument('--n2s_decoder', type=bool, default=False)
+    parser.add_argument('--n2s_decoder', type=bool, default=True)
     parser.add_argument('--v_range', type=float, default=6.0, help='to control the entropy')
     parser.add_argument('--qkv_dim', type=int, default=16)
     parser.add_argument('--head_num', type=int, default=8)
@@ -230,16 +230,16 @@ if __name__ == "__main__":
     parser.add_argument('--train_episodes', type=int, default=10000*2, help="the num. of training instances per epoch")
     parser.add_argument('--accumulation_steps', type=int, default=1)
     parser.add_argument('--train_batch_size', type=int, default=64*2)
-    parser.add_argument('--validation_interval', type=int, default=500)
-    parser.add_argument('--validation_batch_size', type=int, default=2500)
+    parser.add_argument('--validation_interval', type=int, default=200)
+    parser.add_argument('--validation_batch_size', type=int, default=1250)
     parser.add_argument('--select_top_k_val', type=int, default=1)
     parser.add_argument('--val_episodes', type=int, default=10000)
     parser.add_argument("--val_pomo_size", type=int, default=1)
-    parser.add_argument('--model_save_interval', type=int, default=50)
+    parser.add_argument('--model_save_interval', type=int, default=5)
 
     # PIP
-    parser.add_argument("--generate_PI_mask", type=bool, default=True)
-    parser.add_argument('--use_real_PI_mask', type=bool, default=True, help="whether to use PI masking")
+    parser.add_argument("--generate_PI_mask", type=bool, default=False)
+    parser.add_argument('--use_real_PI_mask', type=bool, default=False, help="whether to use PI masking")
     parser.add_argument('--pip_step', type=int, default=1)
     parser.add_argument('--pip_decoder', action='store_true', default=False)
     parser.add_argument('--lazy_pip_model', type=bool, default=False)
@@ -258,7 +258,7 @@ if __name__ == "__main__":
     parser.add_argument('--non_linear', type=str, default=None, choices=[None, "fixed_epsilon", "decayed_epsilon", "step", "scalarization"])
     # "step" means separating the target of cost and penalty during improvement training
     parser.add_argument('--epsilon', type=float, default=3.67)
-    parser.add_argument('--epsilon_base', type=float, default=5.)
+    parser.add_argument('--epsilon_base', type=float, default=10.)
     parser.add_argument('--epsilon_decay_beta', type=float, default=0.001)
     parser.add_argument('--non_linear_cons', type=bool, default=False, help="enable non-linear reward function during construction")
     parser.add_argument('--out_reward', type=bool, default=True)
@@ -289,8 +289,8 @@ if __name__ == "__main__":
     parser.add_argument('--imitation_loss_weight', type=float, default=1.)
 
     # improvement
-    parser.add_argument('--improvement_only', type=bool, default=True)
-    parser.add_argument('--improvement_method', type=str, default="kopt", choices=["rm_n_insert", "kopt", "all"])
+    parser.add_argument('--improvement_only', type=bool, default=False)
+    parser.add_argument('--improvement_method', type=str, default="rm_n_insert", choices=["rm_n_insert", "kopt", "all"])
     parser.add_argument('--boundary', type=float, default=0.5)
     parser.add_argument('--insert_before', type=bool, default=True)
     parser.add_argument('--rm_num', type=int, default=1)
@@ -304,8 +304,8 @@ if __name__ == "__main__":
     parser.add_argument('--val_init_sol_strategy', type=str, default="POMO", choices=["random", "greedy_feasible", "random_feasible", "POMO"])
     # parser.add_argument('--POMO_checkpoint', type=str, default="./results/20241020_210610_VRPBLTW_rmPOMOstart_soft_backhaulSoft_penaltyWeight1/epoch-5000.pt")
     # parser.add_argument('--POMO_checkpoint', type=str, default="../PIP-constraint/POMO+PIP/pretrained/TSPTW/tsptw50_hard/POMO_star_PIP/epoch-10000.pt")
-    parser.add_argument('--POMO_checkpoint', type=str, default="../PIP-constraint/POMO+PIP/pretrained/TSPTW/tsptw50_hard/POMO_star_PIP/epoch-10000.pt")
-    # parser.add_argument('--POMO_checkpoint', type=str, default="../PIP-constraint/POMO+PIP/pretrained/TSPTW/tsptw50_hard/POMO_star/epoch-10000.pt")
+    # parser.add_argument('--POMO_checkpoint', type=str, default="../PIP-constraint/POMO+PIP/pretrained/TSPTW/tsptw50_hard/POMO_star_PIP/epoch-10000.pt")
+    parser.add_argument('--POMO_checkpoint', type=str, default="../PIP-constraint/POMO+PIP/pretrained/TSPTW/tsptw50_hard/POMO_star/epoch-10000.pt")
     parser.add_argument('--max_dummy_size', type=int, default=18)
     parser.add_argument('--improve_start_when_dummy_ok', type=bool, default=False)
     parser.add_argument('--improve_steps', type=int, default=5)
@@ -314,7 +314,7 @@ if __name__ == "__main__":
     parser.add_argument('--validation_improve_steps', type=int, default=20)
     parser.add_argument('--val_reconstruct_times', type=int, default=1)
     parser.add_argument('--select_strategy', type=str, default="quality", choices=["quality", "diversity", "quality_stochastic", "diversity_stochastic", "stochastic"])
-    parser.add_argument('--select_top_k', type=int, default=10)
+    parser.add_argument('--select_top_k', type=int, default=5)
     # parser.add_argument('--validation_select_top_k', type=int, default=20)
     parser.add_argument('--stochastic_probability', type=float, default=0.5)
     parser.add_argument('--diversity', type=str, default="kendall_tau_distance", choices=["kendall_tau_distance", "jaccard_distance"])
@@ -336,7 +336,7 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=2023)
     parser.add_argument('--log_dir', type=str, default="./results")
     parser.add_argument('--no_cuda', action='store_true')
-    parser.add_argument('--gpu_id', type=str, default="1")
+    parser.add_argument('--gpu_id', type=str, default="3")
     parser.add_argument('--world_size', type=int, default=1)
     parser.add_argument("--multiple_gpu", type=bool, default=False)
     parser.add_argument('--occ_gpu', type=float, default=0., help="occupy (X)% GPU memory in advance, please use sparingly.")
@@ -369,8 +369,9 @@ if __name__ == "__main__":
     # note = "_TSPTW100_Hard_rmPOMOstart_Soft_womask_withPenalty_varyN_construction_only"
     # note = "_TSPTW50_rmPOMOstart_Soft_sperateModel_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP"
     # note = "_TSPTW50_Hard_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP"
+    note = "_TSPTW100Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_noregnobonus_Rmx1Insbefore_diversity_IL"
     # note = "_TSPTW50Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL"
-    note = "_TSPTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_Impr10sampledFromPIP_Impro5Val20_AMP_kopt"
+    # note = "_TSPTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_Impr10sampledFromPOMOstar_Impro5Val20_AMP_kopt"
     # note = "_TSPDL100Hard_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL_PIP"
     # note = "_TSPTW100Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL_PIP-D"
     # note = "_VRPBLTW_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_tw+capacity"

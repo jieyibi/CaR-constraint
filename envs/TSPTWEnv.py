@@ -892,7 +892,7 @@ class TSPTWEnv:
 
     def improvement_step(self, rec, action, obj, feasible_history, t, weights=0, out_reward = False, penalty_factor=1., penalty_normalize=False, improvement_method = "kopt", insert_before=True, epsilon=EPSILON_hardcoded, seperate_obj_penalty=False, non_linear=None, n2s_decoder=False):
 
-        _, total_history = feasible_history.size()
+        total_history = feasible_history.size(1)
         pre_bsf = obj[:, 1:].clone()  # batch_size, 3 (current, bsf, tsp_bsf)
         feasible_history = feasible_history.clone()  # bs, total_history
 
