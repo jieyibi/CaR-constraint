@@ -1441,17 +1441,21 @@ class Trainer:
             best_reward, best_index = ((obj[0][:, 0] + obj[1][:, 0]).view(batch_size, k)).min(-1)
         else:
             if self.trainer_params["n_imitation"] > 1:
-                # todo: now hardcoded - best obj+penalty, best obj, best penalty
                 obj, penalty = obj
-                best_reward, best_index = ((obj + self.lambda_ * penalty).view(batch_size, k)).min(-1)
-                best_reward, best_index = best_reward.unsqueeze(-1), best_index.unsqueeze(-1)
-                best_reward_, best_index_ = ((obj).view(batch_size, k)).min(-1)
-                best_reward = torch.cat((best_reward, best_reward_.unsqueeze(-1)), -1)
-                best_index = torch.cat((best_index, best_index_.unsqueeze(-1)), -1)
-                best_reward_, best_index_ = ((penalty).view(batch_size, k)).min(-1)
-                best_reward = torch.cat((best_reward, best_reward_.unsqueeze(-1)), -1)
-                best_index = torch.cat((best_index, best_index_.unsqueeze(-1)), -1)
-                obj = obj + self.lambda_ * penalty
+                if self.trainer_params["imitation_type"] == "many":
+                    # todo: now hardcoded - best obj+penalty, best obj, best penalty
+                    best_reward, best_index = ((obj + self.lambda_ * penalty).view(batch_size, k)).min(-1)
+                    best_reward, best_index = best_reward.unsqueeze(-1), best_index.unsqueeze(-1)
+                    best_reward_, best_index_ = ((obj).view(batch_size, k)).min(-1)
+                    best_reward = torch.cat((best_reward, best_reward_.unsqueeze(-1)), -1)
+                    best_index = torch.cat((best_index, best_index_.unsqueeze(-1)), -1)
+                    best_reward_, best_index_ = ((penalty).view(batch_size, k)).min(-1)
+                    best_reward = torch.cat((best_reward, best_reward_.unsqueeze(-1)), -1)
+                    best_index = torch.cat((best_index, best_index_.unsqueeze(-1)), -1)
+                    obj = obj + self.lambda_ * penalty
+                elif self.trainer_params["imitation_type"] == "one":
+                    obj = obj + self.lambda_ * penalty
+                    best_reward, best_index = obj.view(batch_size, k).topk(self.trainer_params["n_imitation"], dim=-1, largest=False)
             else:
                 best_reward, best_index = (obj.view(batch_size, k)).min(-1)
             obj = torch.cat((obj[:, None], obj[:, None], obj[:, None]), -1).clone()
@@ -1522,25 +1526,44 @@ class Trainer:
                     if self.trainer_params["bonus_for_construction"] or self.trainer_params["extra_bonus"] or self.trainer_params["imitation_learning"] or (self.args.problem == "VRPBLTW" and self.trainer_params["reconstruct"]):
                         if self.trainer_params["n_imitation"] == 1:
                             # update best solution
-                            criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (
-                                        obj[0] + obj[1]).clone()
-                            new_best, best_index = criterion[:, 0].view(batch_size, k).min(-1)
+                            criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (obj[0] + obj[1]).clone()
+                            new_best, new_best_index = criterion[:, 0].view(batch_size, k).min(-1)
+                            index = new_best < best_reward
+                            best_reward[index] = new_best[index]  # update best reward
+                            is_improved = (is_improved | index)
+                            rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size)[:, None], new_best_index, :][index].clone()  # update best solution
                         else:
                             obj_ = obj[:, 0].clone()
-                            penalty_ = out_penalty.view(-1) + out_node_penalty.view(-1)
-                            obj_ = obj_ - self.lambda_ * penalty_
-                            new_best, new_best_index = ((obj_ + self.lambda_ * penalty_).view(batch_size, k)).min(-1)
-                            new_best, new_best_index = new_best.unsqueeze(-1), new_best_index.unsqueeze(-1)
-                            new_best_reward_, new_best_index_ = ((obj_).view(batch_size, k)).min(-1)
-                            new_best = torch.cat((new_best, new_best_reward_.unsqueeze(-1)), -1)
-                            new_best_index = torch.cat((new_best_index, new_best_index_.unsqueeze(-1)), -1)
-                            new_best_reward_, new_best_index_ = ((penalty_).view(batch_size, k)).min(-1)
-                            new_best = torch.cat((new_best, new_best_reward_.unsqueeze(-1)), -1)
-                            new_best_index = torch.cat((new_best_index, new_best_index_.unsqueeze(-1)), -1)
-                        index = new_best < best_reward
-                        best_reward[index] = new_best[index]  # update best reward
-                        is_improved = (is_improved | index)
-                        rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size)[:, None], best_index, :][index].clone()  # update best solution
+                            if self.trainer_params["imitation_type"] == "many":
+                                penalty_ = out_penalty.view(-1) + out_node_penalty.view(-1)
+                                obj_ = obj_ - self.lambda_ * penalty_
+                                new_best, new_best_index = ((obj_ + self.lambda_ * penalty_).view(batch_size, k)).min(-1)
+                                new_best, new_best_index = new_best.unsqueeze(-1), new_best_index.unsqueeze(-1)
+                                new_best_reward_, new_best_index_ = ((obj_).view(batch_size, k)).min(-1)
+                                new_best = torch.cat((new_best, new_best_reward_.unsqueeze(-1)), -1)
+                                new_best_index = torch.cat((new_best_index, new_best_index_.unsqueeze(-1)), -1)
+                                new_best_reward_, new_best_index_ = ((penalty_).view(batch_size, k)).min(-1)
+                                new_best = torch.cat((new_best, new_best_reward_.unsqueeze(-1)), -1)
+                                new_best_index = torch.cat((new_best_index, new_best_index_.unsqueeze(-1)), -1)
+                                index = new_best < best_reward
+                                best_reward[index] = new_best[index]  # update best reward
+                                is_improved = (is_improved | index)
+                                rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size)[:, None], new_best_index, :][index].clone()  # update best solution
+                            elif self.trainer_params["imitation_type"] == "one":
+                                new_best, new_best_index = obj_.view(batch_size, k).topk(self.trainer_params["n_imitation"], dim=-1, largest=False)
+                                combined_rewards = torch.cat([best_reward, new_best], dim=1)
+                                combined_indices = torch.cat([best_index, new_best_index], dim=1)
+                                sorted_values, sorted_positions = combined_rewards.topk(self.trainer_params["n_imitation"], dim=1, largest=False)
+                                old_best_reward = best_reward.clone()
+                                best_reward.copy_(sorted_values)
+                                best_index.copy_(combined_indices[torch.arange(batch_size)[:, None], sorted_positions])
+                                is_improved = sorted_values < old_best_reward
+                                current_rec_best = rec_best
+                                new_rec_data = rec.view(batch_size, k, -1)[torch.arange(batch_size)[:, None],new_best_index, :]
+                                combined_rec = torch.cat([current_rec_best, new_rec_data], dim=1)
+                                rec_best.copy_(combined_rec[torch.arange(batch_size)[:, None], sorted_positions])
+                            else:
+                                raise ValueError("Invalid imitation_type: {}".format(self.trainer_params["imitation_type"]))
                     memory.rewards.append(rewards)
                     criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (obj[0] + obj[1]).clone()
                     memory.obj.append(criterion.clone())
@@ -1604,23 +1627,43 @@ class Trainer:
                     if self.trainer_params["n_imitation"] == 1:
                         # update best solution
                         criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (obj[0] + obj[1]).clone()
-                        new_best, best_index = criterion[:, 0].view(batch_size, k).min(-1)
+                        new_best, new_best_index = criterion[:, 0].view(batch_size, k).min(-1)
+                        index = new_best < best_reward
+                        best_reward[index] = new_best[index]  # update best reward
+                        is_improved = (is_improved | index)
+                        rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size)[:, None], new_best_index, :][index].clone()  # update best solution
                     else:
                         obj_ = obj[:, 0].clone()
-                        penalty_ = out_penalty.view(-1) + out_node_penalty.view(-1)
-                        obj_ = obj_ - self.lambda_ * penalty_
-                        new_best, new_best_index = ((obj_ + self.lambda_ * penalty_).view(batch_size, k)).min(-1)
-                        new_best, new_best_index = new_best.unsqueeze(-1), new_best_index.unsqueeze(-1)
-                        new_best_reward_, new_best_index_ = ((obj_).view(batch_size, k)).min(-1)
-                        new_best = torch.cat((new_best, new_best_reward_.unsqueeze(-1)), -1)
-                        new_best_index = torch.cat((new_best_index, new_best_index_.unsqueeze(-1)), -1)
-                        new_best_reward_, new_best_index_ = ((penalty_).view(batch_size, k)).min(-1)
-                        new_best = torch.cat((new_best, new_best_reward_.unsqueeze(-1)), -1)
-                        new_best_index = torch.cat((new_best_index, new_best_index_.unsqueeze(-1)), -1)
-                    index = new_best < best_reward
-                    best_reward[index] = new_best[index]  # update best reward
-                    is_improved = (is_improved | index)
-                    rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size)[:, None], best_index, :][index].clone()  # update best solution
+                        if self.trainer_params["imitation_type"] == "many":
+                            penalty_ = out_penalty.view(-1) + out_node_penalty.view(-1)
+                            obj_ = obj_ - self.lambda_ * penalty_
+                            new_best, new_best_index = ((obj_ + self.lambda_ * penalty_).view(batch_size, k)).min(-1)
+                            new_best, new_best_index = new_best.unsqueeze(-1), new_best_index.unsqueeze(-1)
+                            new_best_reward_, new_best_index_ = ((obj_).view(batch_size, k)).min(-1)
+                            new_best = torch.cat((new_best, new_best_reward_.unsqueeze(-1)), -1)
+                            new_best_index = torch.cat((new_best_index, new_best_index_.unsqueeze(-1)), -1)
+                            new_best_reward_, new_best_index_ = ((penalty_).view(batch_size, k)).min(-1)
+                            new_best = torch.cat((new_best, new_best_reward_.unsqueeze(-1)), -1)
+                            new_best_index = torch.cat((new_best_index, new_best_index_.unsqueeze(-1)), -1)
+                            index = new_best < best_reward
+                            best_reward[index] = new_best[index]  # update best reward
+                            is_improved = (is_improved | index)
+                            rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size)[:, None], new_best_index, :][index].clone()  # update best solution
+                        elif self.trainer_params["imitation_type"] == "one":
+                            new_best, new_best_index = obj_.view(batch_size, k).topk(self.trainer_params["n_imitation"],dim=-1, largest=False)
+                            combined_rewards = torch.cat([best_reward, new_best], dim=1)
+                            combined_indices = torch.cat([best_index, new_best_index], dim=1)
+                            sorted_values, sorted_positions = combined_rewards.topk(self.trainer_params["n_imitation"], dim=1, largest=False)
+                            old_best_reward = best_reward.clone()
+                            best_reward.copy_(sorted_values)
+                            best_index.copy_(combined_indices[torch.arange(batch_size)[:, None], sorted_positions])
+                            is_improved = sorted_values < old_best_reward
+                            current_rec_best = rec_best
+                            new_rec_data = rec.view(batch_size, k, -1)[torch.arange(batch_size)[:, None], new_best_index, :]
+                            combined_rec = torch.cat([current_rec_best, new_rec_data], dim=1)
+                            rec_best.copy_(combined_rec[torch.arange(batch_size)[:, None], sorted_positions])
+                        else:
+                            raise ValueError("Invalid imitation_type: {}".format(self.trainer_params["imitation_type"]))
 
                 if self.model.training: batch_reward.append(rewards[:, 0].clone())
                 memory.rewards.append(rewards)

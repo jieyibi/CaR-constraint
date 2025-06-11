@@ -109,7 +109,8 @@ def args2dict(args):
                       # reward & loss
                       "bonus_for_construction": args.bonus_for_construction, "extra_bonus": args.extra_bonus, "extra_weight": args.extra_weight,
                       "diversity_loss": args.diversity_loss, "diversity_weight": args.diversity_weight, "probs_return": args.probs_return,
-                      "imitation_learning": args.imitation_learning, "imitation_loss_weight": args.imitation_loss_weight, "n_imitation": args.n_imitation,
+                      "imitation_learning": args.imitation_learning, "imitation_loss_weight": args.imitation_loss_weight,
+                      "n_imitation": args.n_imitation, "imitation_type": args.imitation_type,
                       # improvement
                       "improvement_only": args.improvement_only, "init_sol_strategy": args.init_sol_strategy,
                       "max_dummy_size": args.max_dummy_size, "improve_start_when_dummy_ok": args.improve_start_when_dummy_ok,
@@ -231,15 +232,15 @@ if __name__ == "__main__":
     parser.add_argument('--accumulation_steps', type=int, default=1)
     parser.add_argument('--train_batch_size', type=int, default=64*2)
     parser.add_argument('--validation_interval', type=int, default=200)
-    parser.add_argument('--validation_batch_size', type=int, default=1250)
+    parser.add_argument('--validation_batch_size', type=int, default=1000)
     parser.add_argument('--select_top_k_val', type=int, default=1)
     parser.add_argument('--val_episodes', type=int, default=10000)
     parser.add_argument("--val_pomo_size", type=int, default=1)
     parser.add_argument('--model_save_interval', type=int, default=5)
 
     # PIP
-    parser.add_argument("--generate_PI_mask", type=bool, default=False)
-    parser.add_argument('--use_real_PI_mask', type=bool, default=False, help="whether to use PI masking")
+    parser.add_argument("--generate_PI_mask", type=bool, default=True)
+    parser.add_argument('--use_real_PI_mask', type=bool, default=True, help="whether to use PI masking")
     parser.add_argument('--pip_step', type=int, default=1)
     parser.add_argument('--pip_decoder', action='store_true', default=False)
     parser.add_argument('--lazy_pip_model', type=bool, default=False)
@@ -288,6 +289,7 @@ if __name__ == "__main__":
     parser.add_argument('--imitation_learning', type=bool, default=True)
     parser.add_argument('--imitation_loss_weight', type=float, default=1.)
     parser.add_argument('--n_imitation', type=int, default=3)
+    parser.add_argument('--imitation_type', type=str, default="many", choices=["one", "many"])
 
     # improvement
     parser.add_argument('--improvement_only', type=bool, default=False)
@@ -337,7 +339,7 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=2023)
     parser.add_argument('--log_dir', type=str, default="./results")
     parser.add_argument('--no_cuda', action='store_true')
-    parser.add_argument('--gpu_id', type=str, default="2")
+    parser.add_argument('--gpu_id', type=str, default="4")
     parser.add_argument('--world_size', type=int, default=1)
     parser.add_argument("--multiple_gpu", type=bool, default=False)
     parser.add_argument('--occ_gpu', type=float, default=0., help="occupy (X)% GPU memory in advance, please use sparingly.")
@@ -370,7 +372,7 @@ if __name__ == "__main__":
     # note = "_TSPTW100_Hard_rmPOMOstart_Soft_womask_withPenalty_varyN_construction_only"
     # note = "_TSPTW50_rmPOMOstart_Soft_sperateModel_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP"
     # note = "_TSPTW50_Hard_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP"
-    note = "_TSPTW100Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_Multi3IL"
+    note = "_TSPTW100Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_Multi3MIL_PIP"
     # note = "_TSPTW50Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL"
     # note = "_TSPTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_Impr10sampledFromPOMOstar_Impro5Val20_AMP_kopt"
     # note = "_TSPDL100Hard_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL_PIP"
