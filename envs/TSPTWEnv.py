@@ -846,11 +846,15 @@ class TSPTWEnv:
             out_penalty = out_penalty / context[-1][:, 0]
         if out_reward:
             if wo_node_penalty:
-                cost = cost + penalty_factor * (out_penalty)
+                p_ = out_penalty
             elif wo_tour_penalty:
-                cost = cost + penalty_factor * (out_node_penalty)
+                p_ = out_node_penalty
             else:
-                cost = cost + penalty_factor * (out_node_penalty + out_penalty)
+                p_ = (out_node_penalty + out_penalty)
+            if seperate_obj_penalty:
+                cost = [cost, p_]
+            else:
+                cost = cost + penalty_factor * p_
 
         # get context
         if get_context:

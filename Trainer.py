@@ -665,10 +665,10 @@ class Trainer:
             construct_loss = 0.0
 
         if not self.model_params["improvement_only"] and self.trainer_params["imitation_learning"] and best_solution is not None:
-            env.load_problems(batch_size, rollout_size=1, problems=data, aug_factor=1)
+            env.load_problems(batch_size, rollout_size=self.trainer_params["n_imitation"], problems=data, aug_factor=1)
             reset_state, _, _ = env.reset()
             state, reward, done = env.pre_step()
-            imit_prob_list = torch.zeros(size=(batch_size, 1, 0)).to(self.device)
+            imit_prob_list = torch.zeros(size=(batch_size, self.trainer_params["n_imitation"], 0)).to(self.device)
             for step in range(best_solution.size(-1)): # while not done:
                 with torch.amp.autocast(device_type="cuda", enabled=amp_training):
                     _, prob, _ = self.model(state, pomo=self.env_params["pomo_start"], selected=best_solution[:,:,step],
@@ -686,9 +686,9 @@ class Trainer:
                                                            use_predicted_PI_mask=use_predicted_PI_mask,
                                                            pip_step=self.trainer_params["pip_step"]
                                                            )
-            imitation_loss = -(is_improved * imit_prob_list.mean(-1).mean(-1)).mean()
+            imitation_loss = -(is_improved * imit_prob_list.mean(-1)).mean()
             self.metric_logger.construct_metrics["imitation_loss"].update(imitation_loss.item(), batch_size)
-            self.metric_logger.construct_metrics["is_improved"].update(is_improved.sum()/batch_size, batch_size)
+            self.metric_logger.construct_metrics["is_improved"].update(is_improved.sum()/(batch_size*self.trainer_params["n_imitation"]), batch_size)
 
         ##########################################RE-Construction#######################################
         ##########################################RE-Construction#######################################
@@ -1431,8 +1431,8 @@ class Trainer:
         batch_size, k, solution_size = solution.size()
         rec = sol2rec(solution).view(batch_size * k, -1)
 
-        # preapare input
-        obj, context, out_penalty, out_node_penalty = env.get_costs(rec, get_context=True, out_reward=self.trainer_params["out_reward"], penalty_factor = self.lambda_, seperate_obj_penalty=self.trainer_params["seperate_obj_penalty"], wo_node_penalty=self.trainer_params["wo_node_penalty"], wo_tour_penalty=self.trainer_params["wo_tour_penalty"])
+        # prepare input
+        obj, context, out_penalty, out_node_penalty = env.get_costs(rec, get_context=True, out_reward=self.trainer_params["out_reward"], penalty_factor = self.lambda_, seperate_obj_penalty=self.trainer_params["seperate_obj_penalty"] if self.trainer_params["n_imitation"] == 1 else True, wo_node_penalty=self.trainer_params["wo_node_penalty"], wo_tour_penalty=self.trainer_params["wo_tour_penalty"])
         if self.trainer_params["seperate_obj_penalty"]:
             obj, penalty = obj
             obj = torch.cat((obj[:, None], obj[:, None], obj[:, None]), -1).clone()
@@ -1440,8 +1440,21 @@ class Trainer:
             obj = [obj, penalty]
             best_reward, best_index = ((obj[0][:, 0] + obj[1][:, 0]).view(batch_size, k)).min(-1)
         else:
+            if self.trainer_params["n_imitation"] > 1:
+                # todo: now hardcoded - best obj+penalty, best obj, best penalty
+                obj, penalty = obj
+                best_reward, best_index = ((obj + self.lambda_ * penalty).view(batch_size, k)).min(-1)
+                best_reward, best_index = best_reward.unsqueeze(-1), best_index.unsqueeze(-1)
+                best_reward_, best_index_ = ((obj).view(batch_size, k)).min(-1)
+                best_reward = torch.cat((best_reward, best_reward_.unsqueeze(-1)), -1)
+                best_index = torch.cat((best_index, best_index_.unsqueeze(-1)), -1)
+                best_reward_, best_index_ = ((penalty).view(batch_size, k)).min(-1)
+                best_reward = torch.cat((best_reward, best_reward_.unsqueeze(-1)), -1)
+                best_index = torch.cat((best_index, best_index_.unsqueeze(-1)), -1)
+                obj = obj + self.lambda_ * penalty
+            else:
+                best_reward, best_index = (obj.view(batch_size, k)).min(-1)
             obj = torch.cat((obj[:, None], obj[:, None], obj[:, None]), -1).clone()
-            best_reward, best_index = (obj[:, 0].view(batch_size, k)).min(-1)
         total_history = self.trainer_params["total_history"]
         if self.model_params["n2s_decoder"]:
             context2 = torch.zeros(batch_size * k, 4, solution_size)
@@ -1455,13 +1468,13 @@ class Trainer:
         if self.args.problem == "VRPBLTW" and self.trainer_params["reconstruct"] and self.trainer_params["select_strategy"] != "quality":
             # in this case, the selected solutions will not be the best
             best_reward, best_index = (-cons_reward.reshape(batch_size, env.pomo_size)).min(-1)
-            best_solution = env.selected_node_list.reshape(batch_size, env.pomo_size, -1)[torch.arange(batch_size),best_index, :].clone()
+            best_solution = env.selected_node_list.reshape(batch_size, env.pomo_size, -1)[torch.arange(batch_size)[:,None],best_index, :].clone()
             if "TSP" not in self.args.problem: best_solution = get_solution_with_dummy_depot(best_solution.view(batch_size, 1, -1), env.problem_size)
             rec_best = sol2rec(best_solution).view(batch_size, -1)
         else:
-            rec_best = rec.view(batch_size, k, -1)[torch.arange(batch_size),best_index,:].clone()
+            rec_best = rec.view(batch_size, k, -1)[torch.arange(batch_size)[:,None],best_index,:].clone()
         # print(f"!!!!!!!constructed best: {remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size)[:3]}")
-        is_improved = torch.zeros(batch_size).bool()
+        is_improved = torch.zeros(batch_size).bool() if self.trainer_params["n_imitation"] == 1 else torch.zeros(batch_size, self.trainer_params["n_imitation"]).bool()
         # log top k
         if self.args.problem == "VRPBLTW":
             self.metric_logger.improve_metrics["cons_tw_out_ratio"].update((out_penalty[:, 0] > 0).float().mean(), batch_size)
@@ -1507,14 +1520,27 @@ class Trainer:
                         insert_before=self.trainer_params["insert_before"],
                         non_linear=self.trainer_params["non_linear"], n2s_decoder=self.model_params["n2s_decoder"])
                     if self.trainer_params["bonus_for_construction"] or self.trainer_params["extra_bonus"] or self.trainer_params["imitation_learning"] or (self.args.problem == "VRPBLTW" and self.trainer_params["reconstruct"]):
-                        # update best solution
-                        criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (
-                                    obj[0] + obj[1]).clone()
-                        new_best, best_index = criterion[:, 0].view(batch_size, k).min(-1)
+                        if self.trainer_params["n_imitation"] == 1:
+                            # update best solution
+                            criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (
+                                        obj[0] + obj[1]).clone()
+                            new_best, best_index = criterion[:, 0].view(batch_size, k).min(-1)
+                        else:
+                            obj_ = obj[:, 0].clone()
+                            penalty_ = out_penalty.view(-1) + out_node_penalty.view(-1)
+                            obj_ = obj_ - self.lambda_ * penalty_
+                            new_best, new_best_index = ((obj_ + self.lambda_ * penalty_).view(batch_size, k)).min(-1)
+                            new_best, new_best_index = new_best.unsqueeze(-1), new_best_index.unsqueeze(-1)
+                            new_best_reward_, new_best_index_ = ((obj_).view(batch_size, k)).min(-1)
+                            new_best = torch.cat((new_best, new_best_reward_.unsqueeze(-1)), -1)
+                            new_best_index = torch.cat((new_best_index, new_best_index_.unsqueeze(-1)), -1)
+                            new_best_reward_, new_best_index_ = ((penalty_).view(batch_size, k)).min(-1)
+                            new_best = torch.cat((new_best, new_best_reward_.unsqueeze(-1)), -1)
+                            new_best_index = torch.cat((new_best_index, new_best_index_.unsqueeze(-1)), -1)
                         index = new_best < best_reward
                         best_reward[index] = new_best[index]  # update best reward
                         is_improved = (is_improved | index)
-                        rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size), best_index, :][index].clone()  # update best solution
+                        rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size)[:, None], best_index, :][index].clone()  # update best solution
                     memory.rewards.append(rewards)
                     criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (obj[0] + obj[1]).clone()
                     memory.obj.append(criterion.clone())
@@ -1575,13 +1601,26 @@ class Trainer:
                                                                                                  n2s_decoder=self.model_params["n2s_decoder"])
 
                 if self.trainer_params["bonus_for_construction"] or self.trainer_params["extra_bonus"] or self.trainer_params["imitation_learning"] or (self.args.problem == "VRPBLTW" and self.trainer_params["reconstruct"]):
-                    # update best solution
-                    criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (obj[0]+obj[1]).clone()
-                    new_best, best_index = criterion[:, 0].view(batch_size, k).min(-1)
+                    if self.trainer_params["n_imitation"] == 1:
+                        # update best solution
+                        criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (obj[0] + obj[1]).clone()
+                        new_best, best_index = criterion[:, 0].view(batch_size, k).min(-1)
+                    else:
+                        obj_ = obj[:, 0].clone()
+                        penalty_ = out_penalty.view(-1) + out_node_penalty.view(-1)
+                        obj_ = obj_ - self.lambda_ * penalty_
+                        new_best, new_best_index = ((obj_ + self.lambda_ * penalty_).view(batch_size, k)).min(-1)
+                        new_best, new_best_index = new_best.unsqueeze(-1), new_best_index.unsqueeze(-1)
+                        new_best_reward_, new_best_index_ = ((obj_).view(batch_size, k)).min(-1)
+                        new_best = torch.cat((new_best, new_best_reward_.unsqueeze(-1)), -1)
+                        new_best_index = torch.cat((new_best_index, new_best_index_.unsqueeze(-1)), -1)
+                        new_best_reward_, new_best_index_ = ((penalty_).view(batch_size, k)).min(-1)
+                        new_best = torch.cat((new_best, new_best_reward_.unsqueeze(-1)), -1)
+                        new_best_index = torch.cat((new_best_index, new_best_index_.unsqueeze(-1)), -1)
                     index = new_best < best_reward
-                    best_reward[index] = new_best[index] # update best reward
+                    best_reward[index] = new_best[index]  # update best reward
                     is_improved = (is_improved | index)
-                    rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size), best_index, :][index].clone() # update best solution
+                    rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size)[:, None], best_index, :][index].clone()  # update best solution
 
                 if self.model.training: batch_reward.append(rewards[:, 0].clone())
                 memory.rewards.append(rewards)
@@ -1757,8 +1796,8 @@ class Trainer:
         # end update
         memory.clear_memory()
         # print(f"!!!!!!!improved best: {remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size)[:3]}")
-
-        return loss_mean, improve_reward, select_idx, remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size), best_reward, is_improved
+        best_solution = remove_dummy_depot_from_solution(rec2sol(rec_best.view(batch_size*self.trainer_params["n_imitation"], -1)).view(batch_size, self.trainer_params["n_imitation"], -1), env.problem_size)
+        return loss_mean, improve_reward, select_idx, best_solution, best_reward, is_improved
 
     def _val_improvement(self, env, aug_factor, cons_reward, best_solution=None):
 
@@ -2205,7 +2244,7 @@ class Trainer:
                 best_index_[no_feasible] = fallback_index
             index_ = new_best_ < best_reward_iter
             best_reward_iter[index_] = new_best_[index_]  # update best reward
-            rec_best_iter[index_] = rec_iter_history[torch.arange(batch_size), best_index_, :][index_].clone()  # update best solution
+            rec_best_iter[index_] = rec_iter_history[torch.arange(batch_size)[:,None], best_index_, :][index_].clone()  # update best solution
             solution = remove_dummy_depot_from_solution(rec2sol(rec_best_iter).view(batch_size, 1, -1), env.problem_size) # no need to rm redundant depots
             feasible_best = feasible_all.any(0) # shape: (batch*pomo)
 
@@ -2800,7 +2839,7 @@ class Trainer:
             best_solution = None
             if self.args.problem == "VRPBLTW" and self.trainer_params["reconstruct"]:
                 best_reward, best_index = (dist.reshape(batch_size, aug_factor*pomo_size)).min(-1)
-                best_solution = solution.reshape(batch_size, aug_factor*pomo_size, -1)[torch.arange(batch_size), best_index, :].clone()
+                best_solution = solution.reshape(batch_size, aug_factor*pomo_size, -1)[torch.arange(batch_size)[:, None], best_index, :].clone()
             elif self.tester_params["refinement_history_path"] is not None:
                 feasible_all = ~(infeasible.reshape(aug_factor * pomo_size, batch_size))
                 dist_ = - dist.reshape(aug_factor * pomo_size, batch_size).clone()

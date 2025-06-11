@@ -109,7 +109,7 @@ def args2dict(args):
                       # reward & loss
                       "bonus_for_construction": args.bonus_for_construction, "extra_bonus": args.extra_bonus, "extra_weight": args.extra_weight,
                       "diversity_loss": args.diversity_loss, "diversity_weight": args.diversity_weight, "probs_return": args.probs_return,
-                      "imitation_learning": args.imitation_learning, "imitation_loss_weight": args.imitation_loss_weight,
+                      "imitation_learning": args.imitation_learning, "imitation_loss_weight": args.imitation_loss_weight, "n_imitation": args.n_imitation,
                       # improvement
                       "improvement_only": args.improvement_only, "init_sol_strategy": args.init_sol_strategy,
                       "max_dummy_size": args.max_dummy_size, "improve_start_when_dummy_ok": args.improve_start_when_dummy_ok,
@@ -187,7 +187,7 @@ if __name__ == "__main__":
     parser.add_argument('--decoder_layer_num', type=int, default=1, help="the number of MHA in decoder")
     parser.add_argument('--unified_encoder', type=bool, default=True)
     parser.add_argument('--unified_decoder', type=bool, default=False)
-    parser.add_argument('--n2s_decoder', type=bool, default=True)
+    parser.add_argument('--n2s_decoder', type=bool, default=False)
     parser.add_argument('--v_range', type=float, default=6.0, help='to control the entropy')
     parser.add_argument('--qkv_dim', type=int, default=16)
     parser.add_argument('--head_num', type=int, default=8)
@@ -287,10 +287,11 @@ if __name__ == "__main__":
     # parser.add_argument('--select_top_k_grad', default=None, choices=[None, 10])
     parser.add_argument('--imitation_learning', type=bool, default=True)
     parser.add_argument('--imitation_loss_weight', type=float, default=1.)
+    parser.add_argument('--n_imitation', type=int, default=3)
 
     # improvement
     parser.add_argument('--improvement_only', type=bool, default=False)
-    parser.add_argument('--improvement_method', type=str, default="rm_n_insert", choices=["rm_n_insert", "kopt", "all"])
+    parser.add_argument('--improvement_method', type=str, default="kopt", choices=["rm_n_insert", "kopt", "all"])
     parser.add_argument('--boundary', type=float, default=0.5)
     parser.add_argument('--insert_before', type=bool, default=True)
     parser.add_argument('--rm_num', type=int, default=1)
@@ -336,7 +337,7 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=2023)
     parser.add_argument('--log_dir', type=str, default="./results")
     parser.add_argument('--no_cuda', action='store_true')
-    parser.add_argument('--gpu_id', type=str, default="3")
+    parser.add_argument('--gpu_id', type=str, default="2")
     parser.add_argument('--world_size', type=int, default=1)
     parser.add_argument("--multiple_gpu", type=bool, default=False)
     parser.add_argument('--occ_gpu', type=float, default=0., help="occupy (X)% GPU memory in advance, please use sparingly.")
@@ -369,7 +370,7 @@ if __name__ == "__main__":
     # note = "_TSPTW100_Hard_rmPOMOstart_Soft_womask_withPenalty_varyN_construction_only"
     # note = "_TSPTW50_rmPOMOstart_Soft_sperateModel_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP"
     # note = "_TSPTW50_Hard_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP"
-    note = "_TSPTW100Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_noregnobonus_Rmx1Insbefore_diversity_IL"
+    note = "_TSPTW100Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_Multi3IL"
     # note = "_TSPTW50Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL"
     # note = "_TSPTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_Impr10sampledFromPOMOstar_Impro5Val20_AMP_kopt"
     # note = "_TSPDL100Hard_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL_PIP"
