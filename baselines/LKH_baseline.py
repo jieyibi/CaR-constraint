@@ -10,7 +10,7 @@ sys.path.insert(0, "..")  # for utils
 from utils import check_extension, load_dataset, save_dataset, run_all_in_pool
 
 
-def get_lkh_executable(url="http://webhotel4.ruc.dk/~keld/research/LKH-3/LKH-3.0.9.tgz"):
+def get_lkh_executable(url="http://webhotel4.ruc.dk/~keld/research/LKH-3/LKH-3.0.13.tgz"):
     # http://www.akira.ruc.dk/~keld/research/LKH-3/LKH-3.0.6.tgz
     """
         Note: the version of LKH matters.
@@ -49,9 +49,12 @@ def get_lkh_executable(url="http://webhotel4.ruc.dk/~keld/research/LKH-3/LKH-3.0
 
 
 def solve_lkh_log(executable, directory, name, depot, loc, demand, capacity, vehicle=None, route_limit=None, service_time=None, tw_start=None, tw_end=None, draft_limit = None,
-                  runs=1, MAX_TRIALS=10000, grid_size=1, scale=100000, seed=1234, disable_cache=True, problem="CVRP"):
+                  precedence_matrix=None, runs=1, MAX_TRIALS=10000, grid_size=1, scale=100000, seed=1234, disable_cache=True, problem="CVRP"):
 
-    problem_filename = os.path.join(directory, "{}.lkh{}.vrp".format(name, runs))
+    if problem == "SOP":
+        problem_filename = os.path.join(directory, "{}.lkh{}.sop".format(name, runs))
+    else:
+        problem_filename = os.path.join(directory, "{}.lkh{}.vrp".format(name, runs))
     tour_filename = os.path.join(directory, "{}.lkh{}.tour".format(name, runs))
     output_filename = os.path.join(directory, "{}.lkh{}.pkl".format(name, runs))
     param_filename = os.path.join(directory, "{}.lkh{}.par".format(name, runs))
@@ -62,8 +65,11 @@ def solve_lkh_log(executable, directory, name, depot, loc, demand, capacity, veh
         if os.path.isfile(output_filename) and not disable_cache:
             tour, duration = load_dataset(output_filename)
         else:
-            write_vrplib(problem_filename, depot, loc, demand, capacity, vehicle = vehicle, route_limit=route_limit, service_time=service_time,
-                         tw_start=tw_start, tw_end=tw_end, draft_limit=draft_limit, grid_size=grid_size, scale=scale, name=name, problem=problem)
+            if problem == "SOP":
+                write_sop_lkh(problem_filename, loc, precedence_matrix, grid_size=grid_size, scale=scale, name=name)
+            else:
+                write_vrplib(problem_filename, depot, loc, demand, capacity, vehicle = vehicle, route_limit=route_limit, service_time=service_time,
+                             tw_start=tw_start, tw_end=tw_end, draft_limit=draft_limit, grid_size=grid_size, scale=scale, name=name, problem=problem)
 
             params = {"PROBLEM_FILE": problem_filename,
                       "OUTPUT_TOUR_FILE": tour_filename,
@@ -76,18 +82,29 @@ def solve_lkh_log(executable, directory, name, depot, loc, demand, capacity, veh
                 start = time.time()
                 check_call([executable, param_filename], stdout=f, stderr=f)
                 duration = time.time() - start
-            n = len(demand) if problem not in ["TSPTW", "TSPDL"] else len(loc)
-            if os.path.isfile(tour_filename):
-                tour = read_lkh_vrplib(tour_filename, n=n)
-            else:
-                print("Instance {} doesn't have feasible solution via LKH3, generate wrong tour!".format(name))
-                if problem in ["TSPTW", "TSPDL"]:
-                    tour = np.arange(1, len(loc))
+
+            if problem == "SOP":
+                n = len(loc)
+                if os.path.isfile(tour_filename):
+                    tour = read_lkh_sop(tour_filename, n=n)
                 else:
-                    tour = np.arange(1, len(loc)+1)
-            save_dataset((tour, duration), output_filename, disable_print=True)
-            # if os.path.isfile(tour_filename):
-            return calc_vrp_cost(depot, loc, tour, problem), tour, duration
+                    print("Instance {} doesn't have feasible solution via LKH3, generate wrong tour!".format(name))
+                    tour = list(range(n))  # Default tour: 0, 1, 2, ..., n-1
+                save_dataset((tour, duration), output_filename, disable_print=True)
+                return calc_sop_cost(loc, tour, precedence_matrix), tour, duration
+            else:
+                n = len(demand) if problem not in ["TSPTW", "TSPDL"] else len(loc)
+                if os.path.isfile(tour_filename):
+                    tour = read_lkh_vrplib(tour_filename, n=n)
+                else:
+                    print("Instance {} doesn't have feasible solution via LKH3, generate wrong tour!".format(name))
+                    if problem in ["TSPTW", "TSPDL"]:
+                        tour = np.arange(1, len(loc))
+                    else:
+                        tour = np.arange(1, len(loc)+1)
+                save_dataset((tour, duration), output_filename, disable_print=True)
+                # if os.path.isfile(tour_filename):
+                return calc_vrp_cost(depot, loc, tour, problem), tour, duration
 
     except Exception as e:
         raise
@@ -114,6 +131,36 @@ def calc_vrp_cost(depot, loc, tour, problem):
         return (np.linalg.norm(sorted_locs[1:] - sorted_locs[:-1], axis=-1) * not_to_depot).sum()
     else:
         raise NotImplementedError
+
+
+def calc_sop_cost(loc, tour, precedence_matrix=None):
+    """
+    Calculate SOP path cost from start node (0) to end node (problem_size-1).
+    For SOP, the cost is the path length from start to end, excluding return to start.
+
+    Args:
+        loc: node coordinates, shape (n, 2)
+        tour: list of node indices (0-indexed), should start with 0 and end with n-1
+        precedence_matrix: optional precedence matrix (n, n), -1 for forbidden edges
+    Returns:
+        total path cost
+    """
+    loc = np.array(loc)
+    tour = np.array(tour)
+
+    # SOP tour should start with node 0 and end with node n-1 (0-indexed)
+    # Note: LKH file format is 1-indexed (1 to n), but read_lkh_sop converts to 0-indexed (0 to n-1)
+    assert tour[0] == 0, "SOP tour must start with node 0 (0-indexed), got {}".format(tour[0])
+    assert tour[-1] == len(loc) - 1, "SOP tour must end with node {} (0-indexed), got {}".format(len(loc) - 1, tour[-1])
+
+    # Calculate distances between consecutive nodes in the tour
+    # This is a PATH (not a cycle): 0 -> ... -> (n-1)
+    # We only sum distances from start to end, excluding return to start
+    sorted_locs = loc[tour]
+    distances = np.linalg.norm(sorted_locs[1:] - sorted_locs[:-1], axis=-1)
+
+    # Sum all segment distances (from start to end, excluding return)
+    return distances.sum()
 
 
 def write_lkh_par(filename, parameters):
@@ -174,6 +221,44 @@ def read_lkh_vrplib(filename, n):
     assert tour[0] == 0  # Tour should start with depot
     assert tour[-1] != 0  # Tour should not end with depot
     return tour[1:].tolist()
+
+
+def read_lkh_sop(filename, n):
+    """
+    Read LKH SOP tour file.
+    LKH file format: 1-indexed, starts with node 1, ends with node n (dimension), then -1.
+    This function converts to 0-indexed for internal use.
+
+    Args:
+        filename: path to tour file
+        n: number of nodes (dimension)
+    Returns:
+        tour: list of node indices (0-indexed), from start (0) to end (n-1)
+    """
+    with open(filename, 'r') as f:
+        tour = []
+        dimension = 0
+        started = False
+        for line in f:
+            if started:
+                loc = int(line.strip())
+                if loc == -1:
+                    break
+                tour.append(loc)
+            if line.startswith("DIMENSION"):
+                dimension = int(line.split(" ")[-1])
+            if line.startswith("TOUR_SECTION"):
+                started = True
+
+    assert len(tour) == dimension, "Tour length {} != dimension {}".format(len(tour), dimension)
+    # LKH file is 1-indexed (1 to n), convert to 0-indexed (0 to n-1)
+    tour = np.array(tour).astype(int) - 1
+
+    # After conversion, SOP tour should start with 0 and end with n-1 (0-indexed)
+    assert tour[0] == 0, "SOP tour must start with node 0 (after conversion), got {}".format(tour[0])
+    assert tour[-1] == n - 1, "SOP tour must end with node {} (after conversion), got {}".format(n - 1, tour[-1])
+
+    return tour.tolist()
 
 
 def write_vrplib(filename,  depot, loc, demand, capacity, vehicle=None, route_limit=None, service_time=None, tw_start=None, tw_end=None, draft_limit=None,
@@ -326,17 +411,84 @@ def write_vrplib(filename,  depot, loc, demand, capacity, vehicle=None, route_li
         f.write("EOF\n")
 
 
+def write_sop_lkh(filename, loc, precedence_matrix, grid_size=1, scale=100000, name="SOP"):
+    """
+    Write SOP instance in LKH format.
+
+    Args:
+        filename: output file path
+        loc: node coordinates, shape (n, 2)
+        precedence_matrix: precedence matrix, shape (n, n), -1 for forbidden edges, 0 for allowed
+        grid_size: grid size for scaling
+        scale: scale factor for converting float to int
+        name: instance name
+    """
+    loc = np.array(loc)
+    precedence_matrix = np.array(precedence_matrix)
+    n = len(loc)
+
+    # Calculate Euclidean distance matrix (vectorized)
+    # Use broadcasting: loc[:, None, :] is (n, 1, 2), loc[None, :, :] is (1, n, 2)
+    # Result: (n, n, 2) -> (n, n) after norm
+    loc_i = loc[:, None, :]  # (n, 1, 2)
+    loc_j = loc[None, :, :]  # (1, n, 2)
+    distances = np.linalg.norm(loc_i - loc_j, axis=-1)  # (n, n)
+
+    # Convert to integers: int(x / grid_size * scale + 0.5)
+    distance_matrix = np.round(distances / grid_size * scale).astype(int)
+
+    # Apply precedence constraints: set forbidden edges to -1
+    distance_matrix[precedence_matrix == -1] = -1
+    distance_matrix[0, -1] = 1e10
+    distance_matrix[1:, 0] = -1
+    distance_matrix[-1, :-1] = -1
+
+    # Set diagonal to 0 (self-loops)
+    np.fill_diagonal(distance_matrix, 0)
+
+    with open(filename, 'w') as f:
+        # File header
+        f.write("\n".join([
+            "{} : {}".format(k, v)
+            for k, v in (
+                ("NAME", name),
+                ("TYPE", "SOP"),
+                ("COMMENT", "SOP Instance"),
+                ("DIMENSION", n),
+                ("EDGE_WEIGHT_TYPE", "EXPLICIT"),
+                ("EDGE_WEIGHT_FORMAT", "FULL_MATRIX")
+            )
+        ]))
+        f.write("\n")
+
+        # EDGE_WEIGHT_SECTION
+        f.write("EDGE_WEIGHT_SECTION\n")
+        f.write("{}\n".format(n))
+
+        # Write distance matrix row by row
+        for i in range(n):
+            row = []
+            for j in range(n):
+                if distance_matrix[i, j] == -1:
+                    row.append("-1")
+                else:
+                    row.append(str(int(distance_matrix[i, j])))
+            f.write(" ".join(row) + "\n")
+
+        f.write("EOF\n")
+
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="LKH baseline, due to different problem settings, not recommend to use LKH3 to solve VRPB and VRPBTW")
-    parser.add_argument('--problem', type=str, default="TSPTW", choices=["TSPTW", "CVRP", "OVRP", "VRPL", "VRPTW", "VRPB", "VRPBTW"])
-    parser.add_argument("--datasets", nargs='+', default=["../data/TSPTW/tsptw500_zhang_uniform_1020.pkl", ], help="Filename of the dataset(s) to evaluate")
+    parser.add_argument('--problem', type=str, default="SOP", choices=["TSPTW", "CVRP", "OVRP", "VRPL", "VRPTW", "VRPB", "VRPBTW", "SOP"])
+    parser.add_argument("--datasets", nargs='+', default=["../data/SOP/sop50_uniform_prec0.2_geom0.8_bal0.0.pkl", ], help="Filename of the dataset(s) to evaluate")
     parser.add_argument("-f", action='store_false', help="Set true to overwrite")
     parser.add_argument("-o", default=None, help="Name of the results file to write")
     parser.add_argument("--cpus", default=16, type=int, help="Number of CPUs to use, defaults to all cores")
     parser.add_argument('--disable_cache', action='store_false', help='Disable caching')
     parser.add_argument('--progress_bar_mininterval', type=float, default=0.1, help='Minimum interval')
-    parser.add_argument('-n', type=int, default=16, help="Number of instances to process")
+    parser.add_argument('-n', type=int, default=10000, help="Number of instances to process")
     parser.add_argument('-runs', type=int, default=1, help="hyperparameters for LKH3")
     parser.add_argument('-max_trials', type=int, default=10000, help="hyperparameters for LKH3")
     parser.add_argument('-scale', type=int, default=10000000, help="coefficient for float -> int")
@@ -346,8 +498,8 @@ if __name__ == "__main__":
 
     opts = parser.parse_args()
     assert opts.o is None or len(opts.datasets) == 1, "Cannot specify result filename with more than one dataset"
-    problem_dict = {"TSPDL": "TSPDL", "TSPTW": "TSPTW", "CVRP": "CVRP", "OVRP": "OVRP", "VRPB": "VRPB", "VRPTW": "CVRPTW", "VRPL": "DCVRP", "VRPBTW": "VRPBTW"}
-    opts.problem = problem_dict[opts.problem]
+    problem_dict = {"TSPDL": "TSPDL", "TSPTW": "TSPTW", "CVRP": "CVRP", "OVRP": "OVRP", "VRPB": "VRPB", "VRPTW": "CVRPTW", "VRPL": "DCVRP", "VRPBTW": "VRPBTW", "SOP": "SOP"}
+    opts.problem = problem_dict.get(opts.problem, opts.problem)
     if opts.problem in ["VRPB", "VRPBTW"]:
         print(">> Warnings: Due to different problem settings, not recommend to use LKH3 to solve VRPB and VRPBTW!")
 
@@ -368,7 +520,7 @@ if __name__ == "__main__":
 
         def run_func(args):
             directory, name, *args = args
-            depot, loc, demand, capacity, route_limit, service_time, tw_start, tw_end, draft_limit, vehicle = None, None, None, None, None, None, None, None, None, None
+            depot, loc, demand, capacity, route_limit, service_time, tw_start, tw_end, draft_limit, vehicle, precedence_matrix = None, None, None, None, None, None, None, None, None, None, None
             if opts.problem in ["OVRP", "VRPB"]:
                 depot, loc, demand, capacity, *args = args
             elif opts.problem in ["CVRP"]:
@@ -381,23 +533,25 @@ if __name__ == "__main__":
                 depot, loc, demand, capacity, service_time, tw_start, tw_end, vehicle, *args = args
             elif opts.problem in ["DCVRP"]:
                 depot, loc, demand, capacity, route_limit, *args = args
+            elif opts.problem in ["SOP"]:
+                loc, precedence_matrix, *args = args
             else:
                 raise NotImplementedError
 
-            if opts.problem not in ["TSPTW", "TSPDL"]:
+            if opts.problem not in ["TSPTW", "TSPDL", "SOP"]:
                 depot = depot[0] if len(depot) == 1 else depot  # if depot: [[x, y]] -> [x, y]
                 grid_size = 1
                 if len(args) > 0:
                     depot_types, customer_types, grid_size = args
             elif opts.problem in ["TSPTW"]:
                 grid_size = 100
-            elif opts.problem in ["TSPDL"]:
+            elif opts.problem in ["TSPDL", "SOP"]:
                 grid_size = 1
 
             return solve_lkh_log(
                 executable,
                 directory, name,
-                depot=depot, loc=loc, demand=demand, capacity=capacity, vehicle =vehicle, route_limit=route_limit, service_time=service_time, tw_start=tw_start, tw_end=tw_end, draft_limit = draft_limit,
+                depot=depot, loc=loc, demand=demand, capacity=capacity, vehicle =vehicle, route_limit=route_limit, service_time=service_time, tw_start=tw_start, tw_end=tw_end, draft_limit = draft_limit, precedence_matrix=precedence_matrix,
                 runs=opts.runs, MAX_TRIALS=opts.max_trials, grid_size=grid_size, scale=opts.scale, seed=opts.seed, disable_cache=opts.disable_cache, problem=opts.problem
             )
 

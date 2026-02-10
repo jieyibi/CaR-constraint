@@ -349,16 +349,16 @@ def solve_or_tools_log(directory, name, depot, loc, demand, capacity, route_limi
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="OR-Tools baseline")
-    parser.add_argument('--problem', type=str, default="CVRP", choices=["CVRP", "OVRP", "VRPB", "VRPL", "VRPTW", "OVRPTW",
+    parser.add_argument('--problem', type=str, default="VRPBLTW", choices=["CVRP", "OVRP", "VRPB", "VRPL", "VRPTW", "OVRPTW",
                                                                         "OVRPB", "OVRPL", "VRPBL", "VRPBTW", "VRPLTW",
                                                                         "OVRPBL", "OVRPBTW", "OVRPLTW", "VRPBLTW", "OVRPBLTW"])
-    parser.add_argument("--datasets", nargs='+', default=["../data/CVRP/cvrp50_uniform.pkl", ], help="Filename of the dataset(s) to evaluate")
+    parser.add_argument("--datasets", nargs='+', default=["../data/VRPBLTW/vrpbltw200_uniform.pkl", ], help="Filename of the dataset(s) to evaluate")
     parser.add_argument("-f", action='store_false', help="Set true to overwrite")
     parser.add_argument("-o", default=None, help="Name of the results file to write")
-    parser.add_argument("--cpus", type=int, help="Number of CPUs to use, defaults to all cores")
+    parser.add_argument("--cpus", type=int, default=16, help="Number of CPUs to use, defaults to all cores")
     parser.add_argument('--progress_bar_mininterval', type=float, default=0.1, help='Minimum interval')
-    parser.add_argument('-n', type=int, default=1000, help="Number of instances to process")
-    parser.add_argument('-timelimit', type=int, default=20, help="timelimit (seconds) for OR-Tools to solve an instance")
+    parser.add_argument('-n', type=int, default=128, help="Number of instances to process")
+    parser.add_argument('-timelimit', type=int, default=800, help="timelimit (seconds) for OR-Tools to solve an instance")
     parser.add_argument('-seed', type=int, default=1234, help="random seed")
     parser.add_argument('--offset', type=int, default=0, help="Offset where to start processing")
     parser.add_argument('--results_dir', default='baseline_results', help="Name of results directory")
