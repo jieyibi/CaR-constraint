@@ -140,7 +140,9 @@ def main(rank, world_size, args, env_params, model_params, optimizer_params, tra
     trainer = Trainer(args, env_params, model_params, optimizer_params, trainer_params, tester_params, rank)
     if rank==0 and not args.eval_only: copy_all_src(args.log_path)
     if args.eval_only:
-        trainer.test()
+        with torch.inference_mode():
+            with torch.amp.autocast("cuda"):
+                trainer.test()
     else:
         trainer.train()
     if args.multi_processing: cleanup()
@@ -155,16 +157,16 @@ if __name__ == "__main__":
     parser.add_argument('--tw_duration', type=str, default="1020", choices=["1020", "75100", "2550", "5075", "random", "curriculum"])
     parser.add_argument('--dl_percent', type=int, default=90, help="percentage of nodes that DL < total demand")
     parser.add_argument('--random_delta_t', type=float, default=0)
-    parser.add_argument('--problem_size', type=int, default=50)
-    parser.add_argument('--pomo_size', type=int, default=50, help="the number of start node, should <= problem size")
+    parser.add_argument('--problem_size', type=int, default=100)
+    parser.add_argument('--pomo_size', type=int, default=100, help="the number of start node, should <= problem size")
     parser.add_argument('--pomo_start', type=bool, default=False)
     parser.add_argument('--pomo_feasible_start', type= bool, default=False)
     parser.add_argument('--fsb_start_delay', type=int, default=10000)
-    parser.add_argument('--val_dataset', type=str, nargs='+', default =["tsptw50_da_silva_uniform.pkl"]) # ["tsptw100_da_silva_uniform_varyN.pkl"]
+    parser.add_argument('--val_dataset', type=str, nargs='+', default =["tsptw100_da_silva_uniform_varyN.pkl"]) # ["tsptw100_da_silva_uniform_varyN.pkl"]
     parser.add_argument('--select_top_k_val', type=int, default=1)
     parser.add_argument('--select_top_k', type=int, default=10)
-    parser.add_argument('--improve_steps', type=int, default=5 )
-    parser.add_argument('--validation_improve_steps', type=int, default=20)
+    parser.add_argument('--improve_steps', type=int, default=10)
+    parser.add_argument('--validation_improve_steps', type=int, default=80)
     parser.add_argument('--enable_eas', type=bool, default=False)
     parser.add_argument('--iterations', type=int, default=200, help='Number of iterations for EAS')
     parser.add_argument('--iterations_impr', type=int, default=10, help='Number of iterations for EAS')
@@ -174,33 +176,41 @@ if __name__ == "__main__":
     # tester_params
     parser.add_argument('--eval_only', type=bool, default=True)
     parser.add_argument('--test_episodes', type=int, default=10000)
-    parser.add_argument('--test_batch_size', type=int, default=2500)
+    parser.add_argument('--test_batch_size', type=int, default=3334)
     parser.add_argument("--test_pomo_size", type=int, default=1)
-    parser.add_argument('--test_dataset', type=str, default=["tsptw50_da_silva_uniform.pkl"])
+    parser.add_argument('--test_dataset', type=str, default=["tsptw100_da_silva_uniform_varyN.pkl"])
     # parser.add_argument('--test_dataset', type=str, default=["tsptw50_da_silva_uniform.pkl"])
     # parser.add_argument('--test_dataset', type=str, nargs='+', default=['/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n120-k6.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n172-k51.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n157-k13.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n134-k13.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n190-k8.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n200-k36.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n139-k10.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n228-k23.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n219-k73.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n106-k14.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n247-k50.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n195-k51.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n129-k18.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n209-k16.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n251-k28.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n162-k11.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n125-k30.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n115-k10.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n167-k10.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n110-k13.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n153-k22.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n148-k46.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n176-k26.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n186-k15.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n101-k25.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n143-k7.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n181-k23.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n237-k14.pkl'])#["tsptw100_da_silva_uniform.pkl"]
     parser.add_argument('--is_lib', type=bool, default=False)
     parser.add_argument('--test_z_sample_size', type=int, default=0)
-    parser.add_argument('--eval_type', type=str, default="softmax", choices=["argmax", "softmax"])
-    parser.add_argument('--sample_size', type=int, default = 1)
+    parser.add_argument('--eval_type', type=str, default="argmax", choices=["argmax", "softmax"])
+    parser.add_argument('--sample_size', type=int, default=1)
     parser.add_argument('--aux_mask', type=bool, default=False, help="only activates when problem == VRPBLTW")
 
 
     # load
     # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/TSPTW50/20250125_053633_TSPTW50Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_Impr[POMO5]_Impro5Val20_AMP_noregnobonus_kopt/epoch-5000.pt")
+    # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/PIP-constraint/POMO+PIP/pretrained/TSPTW/tsptw50_hard/POMO_star_PIP/epoch-10000.pt")
     # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/TSPTW100/20240928_224256_TSPTW100_Hard_varyN_pip-d_m0/epoch-10000.pt")
+    # parser.add_argument('--checkpoint', type=str,default="/home/jieyi/PIP-constraint/POMO+PIP/pretrained/TSPTW/tsptw100_hard/POMO_star_PIP-D/epoch-10000.pt")
+
     # parser.add_argument('--checkpoint', type=str, default="./test/TSPTW50/20250122_163049_TSPTW50Hard_rmPOMOstart_Soft_construction_only/epoch-5000.pt")
     # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/TSPTW50/epoch-10000.pt")
     #CaR-POMO
     # parser.add_argument('--checkpoint', type=str, default="./test/TSPTW50/20250113_215150_TSPTW50Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL/epoch-5000.pt")
     # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/TSPTW100/20250118_030220_TSPTW100Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL/epoch-1600.pt")
     # CaR-PIP
-    parser.add_argument('--checkpoint', type=str, default="test/TSPTW50/20250224_001641_TSPTW50Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL_[PIP]/epoch-5000.pt")
+    # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/TSPTW100/epoch-4000.pt")
+    # parser.add_argument('--checkpoint', type=str, default="test/TSPTW50/20250224_001641_TSPTW50Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL_[PIP]/epoch-5000.pt")
     # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/TSPTW100/20250303_150240_TSPTW100Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL_PIPLoadFrom705/epoch-5000.pt")
-    parser.add_argument('--gpu_id', type=str, default="1")
+    # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/TSPTW100/20250224_002449_TSPTW100Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL_PIP_Imprpenaltyweight2From600ckpt/epoch-4000.pt")
+    # parser.add_argument('--checkpoint', type=str, default="test/TSPTW100/20250608_193044_TSPTW100Hard_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro10Val20_AMP_noregnobonus_kopt_diversity_IL_PIP/epoch-1300.pt")
+    parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/results/epoch-1600.pt")
+
+    parser.add_argument('--gpu_id', type=str, default="3")
     parser.add_argument('--load_optimizer', type=bool, default=False)
-    parser.add_argument("--generate_PI_mask", type=bool, default=True)
-    parser.add_argument('--use_real_PI_mask', type=bool, default=True, help="whether to use PI masking")
+    parser.add_argument("--generate_PI_mask", type=bool, default=False)
+    parser.add_argument('--use_real_PI_mask', type=bool, default=False, help="whether to use PI masking")
 
     # model_params
     parser.add_argument('--model_type', type=str, default="SINGLE", choices=["SINGLE", "MTL", "MOE"])

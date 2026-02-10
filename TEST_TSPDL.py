@@ -165,19 +165,25 @@ if __name__ == "__main__":
     parser.add_argument('--iterations_impr', type=int, default=20, help='Number of iterations for EAS')
     parser.add_argument('--best_solution_path', type=str, default=None) #"cvrp50_car_eas_best_solution_t200") #"tw50_pip_best_solution.pkl")
     parser.add_argument('--refinement_history_path', type=str, default=None) #"cvrp50_car_eas_history_t200") #"")
-    parser.add_argument('--gpu_id', type=str, default="0")
+    parser.add_argument('--gpu_id', type=str, default="3")
     # tester_params
-    parser.add_argument('--validation_improve_steps', type=int, default=10)
+    parser.add_argument('--improve_steps', type=int, default=10)
+    parser.add_argument('--validation_improve_steps', type=int, default= 20)
     parser.add_argument('--eval_only', type=bool, default=True)
     parser.add_argument('--test_episodes', type=int, default=10000)
-    parser.add_argument('--test_batch_size', type=int, default=500)
+    parser.add_argument('--test_batch_size', type=int, default=5000)
     parser.add_argument("--test_pomo_size", type=int, default=1)
     parser.add_argument('--test_dataset', type=str, nargs='+', default=["tspdl50_hard.pkl"])#["tsptw100_da_silva_uniform.pkl"]
     parser.add_argument('--test_z_sample_size', type=int, default=0)
     parser.add_argument('--is_lib', type=bool, default=False)
-    parser.add_argument('--eval_type', type=str, default="argmax", choices=["argmax", "softmax"])
+    parser.add_argument('--eval_type', type=str, default="softmax", choices=["argmax", "softmax"])
     parser.add_argument('--sample_size', type=int, default = 1)
     parser.add_argument('--aux_mask', type=bool, default=False, help="only activates when problem == VRPBLTW")
+    # load
+    parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/results/20250417_205642_TSPDL50Hard_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL_PIP/epoch-5000.pt")
+    # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/PIP-constraint/POMO+PIP/pretrained/TSPDL/tspdl50_hard/POMO_star_PIP/epoch-10000.pt")
+    # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/results/20250327_110521_TSPDL50Hard_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL/epoch-5000.pt")
+    parser.add_argument('--load_optimizer', type=bool, default=True)
 
     # model_params
     parser.add_argument('--model_type', type=str, default="SINGLE", choices=["SINGLE", "MTL", "MOE"])
@@ -240,8 +246,8 @@ if __name__ == "__main__":
     parser.add_argument('--model_save_interval', type=int, default=5)
 
     # PIP
-    parser.add_argument("--generate_PI_mask", type=bool, default=False)
-    parser.add_argument('--use_real_PI_mask', type=bool, default=False, help="whether to use PI masking")
+    parser.add_argument("--generate_PI_mask", type=bool, default=True)
+    parser.add_argument('--use_real_PI_mask', type=bool, default=True, help="whether to use PI masking")
     parser.add_argument('--pip_step', type=int, default=1)
     parser.add_argument('--pip_decoder', action='store_true', default=False)
     parser.add_argument('--lazy_pip_model', type=bool, default=False)
@@ -307,7 +313,6 @@ if __name__ == "__main__":
     parser.add_argument('--POMO_checkpoint', type=str, default="results/20240831_221004_TSPTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_construction_only/epoch-5000.pt")
     parser.add_argument('--max_dummy_size', type=int, default=18)
     parser.add_argument('--improve_start_when_dummy_ok', type=bool, default=False)
-    parser.add_argument('--improve_steps', type=int, default=5)
     parser.add_argument('--dummy_improve_steps', type=int, default=0)
     parser.add_argument('--dummy_improve_selected', type=str, default="random", choices=["random", "topk"])
 
@@ -326,10 +331,6 @@ if __name__ == "__main__":
     parser.add_argument('--with_regular', type=bool, default=False)
     parser.add_argument('--with_bonus', type=bool, default=False)
     parser.add_argument('--seperate_obj_penalty', type=bool, default=False)
-
-    # load
-    parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/results/20250327_110521_TSPDL50Hard_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprTop10Qual_Impro5Val20_AMP_noregnobonus_kopt_diversity_IL/epoch-5000.pt")
-    parser.add_argument('--load_optimizer', type=bool, default=True)
 
     # settings (e.g., GPU)
     parser.add_argument('--seed', type=int, default=2023)

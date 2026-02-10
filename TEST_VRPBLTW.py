@@ -163,38 +163,39 @@ if __name__ == "__main__":
     parser.add_argument('--val_dataset', type=str, nargs='+', default =None) # ["tsptw100_da_silva_uniform_varyN.pkl"]
     parser.add_argument('--select_top_k_val', type=int, default=1)
     parser.add_argument('--select_top_k', type=int, default=10)
-    parser.add_argument('--improve_steps', type=int, default=5)
-    parser.add_argument('--validation_improve_steps', type=int, default= 20)
+    parser.add_argument('--improve_steps', type=int, default=0)
+    parser.add_argument('--validation_improve_steps', type=int, default= 0)
     parser.add_argument('--enable_eas', type=bool, default=False)
     parser.add_argument('--iterations', type=int, default=200, help='Number of iterations for EAS')
     parser.add_argument('--iterations_impr', type=int, default=10, help='Number of iterations for EAS')
     parser.add_argument('--best_solution_path', type=str, default=None) #"bltw50_car_rr_best_solution_t200") #"tw50_pip_best_solution.pkl")
-    parser.add_argument('--refinement_history_path', type=str, default=None) #"bltw50_car_rr_history_t200") #"")
+    parser.add_argument('--refinement_history_path', type=str, default="bltw100_soft") #"bltw50_car_rr_history_t200") #"")
 
     # tester_params
     parser.add_argument('--eval_only', type=bool, default=True)
     parser.add_argument('--test_episodes', type=int, default=1000)
-    parser.add_argument('--test_batch_size', type=int, default=500)
+    parser.add_argument('--test_batch_size', type=int, default=40)
     parser.add_argument("--test_pomo_size", type=int, default=1)
     parser.add_argument('--test_dataset', type=str, default=None)
     # parser.add_argument('--test_dataset', type=str, nargs='+', default=['/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n120-k6.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n172-k51.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n157-k13.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n134-k13.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n190-k8.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n200-k36.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n139-k10.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n228-k23.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n219-k73.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n106-k14.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n247-k50.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n195-k51.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n129-k18.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n209-k16.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n251-k28.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n162-k11.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n125-k30.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n115-k10.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n167-k10.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n110-k13.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n153-k22.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n148-k46.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n176-k26.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n186-k15.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n101-k25.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n143-k7.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n181-k23.pkl', '/home/jieyi/unified_solver_1/data/CVRP-LIB/X-n237-k14.pkl'])#["tsptw100_da_silva_uniform.pkl"]
     parser.add_argument('--is_lib', type=bool, default=False)
     parser.add_argument('--test_z_sample_size', type=int, default=0)
-    parser.add_argument('--eval_type', type=str, default="argmax", choices=["argmax", "softmax"])
-    parser.add_argument('--sample_size', type=int, default = 1)
+    parser.add_argument('--eval_type', type=str, default="softmax", choices=["argmax", "softmax"])
+    parser.add_argument('--sample_size', type=int, default = 100)
     parser.add_argument('--aux_mask', type=bool, default=True, help="only activates when problem == VRPBLTW")
 
     # load
-    parser.add_argument('--gpu_id', type=str, default="1")
+    parser.add_argument('--gpu_id', type=str, default="0")
     parser.add_argument('--seed', type=int, default=2024)
     # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/VRPBLTW50/20250120_174629_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_diversity_IL_co10/epoch-5000.pt")
     # parser.add_argument('--checkpoint', type=str, default="./test/VRPBLTW50/20250119_223349_VRPBLTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_N2S_diversity_IL_co10/epoch-5000.pt")
     # parser.add_argument('--checkpoint', type=str, default="./results/20250125_060943_VRPBLTW50_rmPOMOstart_Soft_seperateModel_GroupBaseline_ImprTop5Qual_Impro5Val20_AMP_warmstart_noregnobonus_N2S_diversity_IL_co10/epoch-5000.pt")
 
     # parser.add_argument('--checkpoint', type=str, default="./test/VRPBLTW100/20250219_220016_VRPBLTW100_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprREALTop3Qual_Impro5Val20_AMP_warmstart_noregnobonus_kopt_diversity_IL/epoch-5000.pt")
-    parser.add_argument('--checkpoint', type=str, default="./test/VRPBLTW100/20250219_215131_VRPBLTW100_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprREALTop3Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1InsAfterN2S_diversity_IL/epoch-5000.pt")
+    # parser.add_argument('--checkpoint', type=str, default="./test/VRPBLTW100/20250219_215131_VRPBLTW100_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprREALTop3Qual_Impro5Val20_AMP_warmstart_noregnobonus_Rmx1InsAfterN2S_diversity_IL/epoch-5000.pt")
     # parser.add_argument('--checkpoint', type=str, default="./test/VRPBLTW100/20250503_064818_VRPBLTW100_rmPOMOstart_Soft_SepModel_GroupBaseline_ImprTop3Qual_Impro5Val20_AMP_warmstart_noregnobonus_N2S_diversity_IL/epoch-4880.pt")
-    # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/20250103_110958_VRPBLTW100_rmPOMOstart_Hard_construction_only/epoch-5000.pt")
+    # parser.add_argument('--checkpoint', type=str, default="/data/jieyi/unified_solver_1/test/VRPBLTW100/20250103_110958_VRPBLTW100_rmPOMOstart_Hard_construction_only/epoch-5000.pt")
+    parser.add_argument('--checkpoint', type=str, default="/data/jieyi/unified_solver_1/test/VRPBLTW100/20250103_110904_VRPBLTW100_rmPOMOstart_Soft_construction_only/epoch-5000.pt")
     # parser.add_argument('--checkpoint', type=str, default="/home/jieyi/unified_solver_1/test/VRPBLTW100/20250103_110904_VRPBLTW100_rmPOMOstart_Soft_construction_only/epoch-5000.pt")
     parser.add_argument('--load_optimizer', type=bool, default=False)
 
