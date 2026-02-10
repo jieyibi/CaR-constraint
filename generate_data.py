@@ -20,7 +20,6 @@ if __name__ == "__main__":
     parser.add_argument('--precedence_balance_ratio', type=float, default=0., help="ratio of precedence balance constraints")
     parser.add_argument('--num_samples', type=int, default=10000)
     parser.add_argument('--seed', type=int, default=2025)
-    # parser.add_argument('--dir', type=str, default="/home/jieyi")
     parser.add_argument('--dir', type=str, default="./data")
     parser.add_argument('--no_cuda', action='store_true', default=True)
     parser.add_argument('--gpu_id', type=int, default=0)

@@ -1,9 +1,7 @@
 from dataclasses import dataclass
-import torch
-import os, pickle
-from data_generator import generate_tsptw_data
 from collections import namedtuple
 from utils import *
+
 __all__ = ['TSPTWEnv']
 
 # EPSILON = {
@@ -18,10 +16,217 @@ EPSILON = {
     50: 1.85,
     100: 3.7,
     200: 7.4,
-    500: 14.85
+    500: 14.85,
 }
 
 EPSILON_hardcoded = 1.85
+TSPTW_SET = namedtuple(
+    "TSPTW_SET",
+    [
+        "node_loc",        # Node locations
+        "node_tw",         # Node time windows
+        "durations",       # Service duration per node
+        "service_window",  # Maximum time units
+        "time_factor",
+        "loc_factor",
+    ],
+)
+
+
+def _gen_tw_naive(size, graph_size, time_factor, dura_region, rnds, tw_type="easy"):
+    service_window = int(time_factor * 2)
+
+    # horizon allows for the feasibility of reaching nodes / returning from nodes
+    horizon = np.zeros((size, graph_size, 2))
+    horizon[:] = [0, service_window]
+
+    # sample earliest start times
+    a = rnds.randint(horizon[..., 0], horizon[..., 1] / 2)
+    sp = rnds.randint(0, graph_size, (size, 1))
+    # a[np.arange(size)[:, None], sp] = 0
+    a[:, 0] = 0
+
+    # sample durations
+    epsilon = rnds.uniform(dura_region[0], dura_region[1], a.shape)
+    duration = np.around(time_factor * epsilon)
+    duration[:, 0] = service_window
+
+    tw_high = np.minimum(a + duration, horizon[..., 1]).astype(int)
+    tw = np.concatenate([a[..., None], tw_high[..., None]], axis=2).reshape(
+        size, graph_size, 2
+    )
+
+    if tw_type == "easy":
+        tw[:, :, 0] = 0
+    if tw_type == "none":
+        tw[:, :, 0] = 0
+        tw[:, :, 1] = service_window
+
+    return tw
+
+
+def _gen_tw_window(
+    size,
+    graph_size,
+    time_factor,
+    dura_region,
+    rnds,
+    rand_lt=False,
+    tw=None,
+    sp_rate=1.0,
+    grp_sizes=2,
+    expand_rate=1,
+    tw_type="eval",
+):
+    if tw is None:
+        tw = np.zeros((size, graph_size, 2))
+    if dura_region is None:
+        dura_region = [0.5, 0.75]
+
+    for i in range(size):
+        # permutation of non‑depot nodes
+        grp = rnds.permutation(graph_size - 1) + 1
+        sp_size = int((graph_size - 1) * sp_rate)
+
+        if isinstance(grp_sizes, int):
+            grp_size = grp_sizes
+        else:
+            grp_size = rnds.choice(grp_sizes).item()
+
+        grp_right = rnds.choice(sp_size - 1, grp_size - 1, replace=False).tolist()
+        grp_right.sort()
+        grp_right.append(sp_size - 1)
+
+        left = 0
+        lt = 0
+        for j in range(grp_size):
+            cur_grp_size = grp_right[j] - left + 1
+            tf = time_factor * (cur_grp_size / graph_size)
+            if rand_lt:
+                lt = rnds.randint(0, time_factor)
+            rt = lt + tf * (1 + dura_region[1])
+
+            # expand the random region
+            mt = (lt + rt) / 2
+            llt = mt - (mt - lt) * expand_rate
+            rrt = mt + (rt - mt) * expand_rate
+            ttf = tf * expand_rate
+
+            st = rnds.randint(llt, llt + ttf, (cur_grp_size,))
+            epsilon = rnds.uniform(0.5, 0.75, st.shape)
+            dura = np.round(epsilon * ttf)
+
+            if tw_type == "eval":
+                st[:] = llt
+                dura[:] = rrt - llt
+
+            gidx = grp[left : grp_right[j] + 1]
+            tw[i, gidx, 0] = st
+            tw[i, gidx, 1] = st + dura
+
+            lt = rt
+            left = grp_right[j] + 1
+
+    tw[:, 0] = [0, time_factor * 2]
+    return tw
+
+
+def generate_tsptw_data(
+    size,
+    graph_size,
+    rnds=None,
+    time_factor=100.0,
+    loc_factor=100,
+    tw_type=None,
+    tw_duration="5075",
+    **kwargs,
+):
+    rnds = np.random if rnds is None else rnds
+    service_window = int(time_factor * 2)
+
+    # sample locations
+    nloc = rnds.uniform(size=(size, graph_size, 2)) * loc_factor
+
+    tw_type = tw_type.split("/")
+
+    dura_region_all = {
+        "5075": [0.5, 0.75],
+        "2550": [0.25, 0.50],
+        "1020": [0.1, 0.2],
+        "75100": [0.75, 1.0],
+    }
+    if tw_duration == "random":
+        tw_duration = np.random.choice(["5075", "1020", "2550"])
+    if isinstance(tw_duration, str):
+        dura_region = dura_region_all[tw_duration]
+    else:
+        dura_region = tw_duration
+
+    if tw_type[0] == "window":
+        if tw_type[1] == "easy":
+            er = 1.3
+        else:
+            er = 1.0
+        if graph_size <= 21:
+            grp_sizes = [2, 3]
+        else:
+            grp_sizes = list(range(2, 11))
+        tw = _gen_tw_window(
+            size,
+            graph_size,
+            time_factor,
+            dura_region,
+            rnds,
+            expand_rate=er,
+            grp_sizes=grp_sizes,
+            tw_type=tw_type[1],
+        )
+    elif tw_type[0] == "real":
+        if tw_type[1] == "easy":
+            tw = _gen_tw_naive(
+                size, graph_size, time_factor, dura_region, rnds, tw_type="hard"
+            )
+        elif tw_type[1] == "eval":
+            tw = np.zeros((size, graph_size, 2))
+            tw[:, :, 0] = 0
+            tw[:, :, 1] = time_factor * 2
+
+        if graph_size <= 21:
+            grp_sizes = 2
+        else:
+            grp_sizes = list(range(2, 7))
+        tw = _gen_tw_window(
+            size,
+            graph_size,
+            time_factor,
+            dura_region,
+            rnds,
+            rand_lt=True,
+            tw=tw,
+            grp_sizes=grp_sizes,
+            sp_rate=0.3,
+            tw_type=tw_type[1],
+        )
+    elif tw_type[0] == "naive":
+        tw = _gen_tw_naive(
+            size, graph_size, time_factor, dura_region, rnds, tw_type=tw_type[1]
+        )
+    elif tw_type[0] == "easy":
+        dura_region = [0.75, 1.75]
+        tw = _gen_tw_naive(
+            size, graph_size, time_factor, dura_region, rnds, tw_type=tw_type[1]
+        )
+    else:
+        raise AssertionError(f"unknown tw type {tw_type}")
+
+    return TSPTW_SET(
+        node_loc=nloc,
+        node_tw=tw,
+        durations=tw[..., 1] - tw[..., 0],
+        service_window=[service_window] * size,
+        time_factor=[time_factor] * size,
+        loc_factor=[loc_factor] * size,
+    )
 
 @dataclass
 class Reset_State:
