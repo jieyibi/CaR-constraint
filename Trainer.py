@@ -1,4 +1,7 @@
 import os
+
+import matplotlib.pyplot as plt
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import copy
 import re
@@ -63,6 +66,7 @@ class Trainer:
         self.envs = get_env(self.args.problem)
         self.model = get_model(self.args.model_type)(**self.model_params).to(self.device)
         if self.args.multiple_gpu:
+            self.model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
             self.model = DDP(self.model, device_ids=[rank], find_unused_parameters=True, static_graph=True)
         if self.args.uncertainty_weight:
             self.loss_fn = MultiTaskLoss()
@@ -74,7 +78,9 @@ class Trainer:
                                        **self.optimizer_params['optimizer'])
         else:
             # [torch.zeros([self.args.train_batch_size, 40])]
+            # self.lambda_ = 2.0
             self.lambda_ = [torch.tensor(0.)] * trainer_params["constraint_number"] if trainer_params["subgradient"] else self.trainer_params["penalty_factor"]
+            print(self.lambda_)
             self.subgradient_lr = trainer_params["subgradient_lr"]
             self.optimizer = Optimizer(self.model.parameters(), **self.optimizer_params['optimizer'])
         self.scheduler = Scheduler(self.optimizer, **self.optimizer_params['scheduler'])
@@ -108,7 +114,7 @@ class Trainer:
 
             if args.pip_checkpoint:
                 checkpoint_fullname = args.pip_checkpoint
-                checkpoint = torch.load(checkpoint_fullname, map_location=self.device)
+                checkpoint = torch.load(checkpoint_fullname, map_location=self.device, weights_only=False)
                 try:
                     self.lazy_model.load_state_dict(checkpoint['model_state_dict'], strict=True)
                 except:
@@ -133,7 +139,7 @@ class Trainer:
         self.start_epoch = 1
         if args.checkpoint is not None:
             checkpoint_fullname = args.checkpoint
-            checkpoint = torch.load(checkpoint_fullname, map_location=self.device)
+            checkpoint = torch.load(checkpoint_fullname, map_location=self.device, weights_only=False)
             # ckpt = {'model_state_dict': checkpoint['model_state_dict']}
             # torch.save(ckpt, "checkpoint_fullname"+".ckpt")
             if 'model_state_dict' in checkpoint.keys():
@@ -151,12 +157,12 @@ class Trainer:
                         new_state_dict[name] = v
                     self.model.load_state_dict({**new_state_dict}, strict=True)
                 except:
-                                        # from multi-gpus to single-gpu
+                    # from multi-gpus to single-gpu
                     new_state_dict = OrderedDict()
                     for k, v in checkpoint_tmp.items():
-                        name = k[7:]  # remove `module.`
+                        # name = k[7:]  # remove `module.`
                         new_state_dict[name] = v
-                    self.model.load_state_dict({**new_state_dict}, strict=True)
+                    self.model.load_state_dict({**new_state_dict}, strict=False)
             # torch.save(
             #     {
             #         'epoch': checkpoint['epoch'],
@@ -177,7 +183,7 @@ class Trainer:
             self.pomo_model = get_model(self.args.model_type)(**input_model_params).to(self.device)
             print(f"Rank {rank} >> Load from {args.POMO_checkpoint}")
             num_param(self.pomo_model)
-            checkpoint = torch.load(args.POMO_checkpoint, map_location=self.device)
+            checkpoint = torch.load(args.POMO_checkpoint, map_location=self.device, weights_only=False)
             if 'model_state_dict' in checkpoint.keys(): checkpoint = checkpoint['model_state_dict']
             try:
                 self.pomo_model.load_state_dict(checkpoint, strict=True)
@@ -192,6 +198,7 @@ class Trainer:
         # utility
         self.time_estimator = TimeEstimator()
 
+        # self.model = torch.compile(self.model)
         self.binary_string_pool = torch.Tensor([list(i) for i in itertools.product([0, 1], repeat=model_params['z_dim'])])
 
     def train(self):
@@ -214,7 +221,7 @@ class Trainer:
                                            "train_infsb_bsf": "infsb_accuracy_bsf.pt",
                                            "train_accuracy_bsf": "accuracy_bsf.pt"}
                         checkpoint_fullname = os.path.join(self.log_path, pip_checkpoint[self.trainer_params["load_which_pip"]])
-                        checkpoint = torch.load(checkpoint_fullname, map_location=self.device)
+                        checkpoint = torch.load(checkpoint_fullname, map_location=self.device, weights_only=False)
                         try:
                             self.lazy_model.load_state_dict(checkpoint['model_state_dict'], strict=True)
                         except:
@@ -378,6 +385,7 @@ class Trainer:
                                                                self.val_metric_logger.improve_metrics["no_aug_gap_list"]))
                 print(" AUGMENTATION SCORE: {}, Gap: {:.4f} ".format(self.val_metric_logger.improve_metrics["aug_score_list"],
                                                                      self.val_metric_logger.improve_metrics["aug_gap_list"]))
+                print("NO AUG Solution level Infeasible rate: {:.3f}%".format(self.val_metric_logger.improve_metrics["noaug_sol_infeasible_rate_list"]))
                 print("Solution level Infeasible rate: {:.3f}%".format(self.val_metric_logger.improve_metrics["sol_infeasible_rate_list"]))
                 print("Instance level Infeasible rate: {:.3f}%".format(self.val_metric_logger.improve_metrics["ins_infeasible_rate_list"]))
 
@@ -556,8 +564,9 @@ class Trainer:
                 # Use PIP decoder to predict PI masking when the decoder is not trained.
                 use_predicted_PI_mask = True if (self.model_params['pip_decoder'] and not self.is_train_pip_decoder) else False
                 if self.model_params["pip_decoder"] and self.lazy_model is not None and env.selected_count >= 1 and (not self.is_train_pip_decoder):
-                    with torch.no_grad():
-                        use_predicted_PI_mask = self.lazy_model(state, candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None, use_predicted_PI_mask=False, no_select_prob=True)
+                    with torch.inference_mode():
+                        with torch.amp.autocast("cuda") if "cuda" in str(self.device) else torch.inference_mode():
+                            use_predicted_PI_mask = self.lazy_model(state, candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None, use_predicted_PI_mask=False, no_select_prob=True)
                 # Calculate the loss for the PIP decoder
                 if self.model_params['pip_decoder']:
                     prob, probs_sl = prob
@@ -614,7 +623,7 @@ class Trainer:
         ###########################################Improvement########################################
         ###########################################Improvement########################################
         # tik = time.time()
-        if "TSP" not in self.args.problem and not self.model_params["improvement_only"]: self.metric_logger.dummy_size.update(env.dummy_size, batch_size)
+        if "TSP" not in self.args.problem and self.args.problem != "SOP" and not self.model_params["improvement_only"]: self.metric_logger.dummy_size.update(env.dummy_size, batch_size)
         start_sign = True
         if self.trainer_params["improve_start_when_dummy_ok"] and env.selected_node_list.size(-1) > (self.trainer_params["max_dummy_size"] + self.env_params["problem_size"]):
             start_sign = False
@@ -628,7 +637,7 @@ class Trainer:
                                                                   rollout_size=self.trainer_params['select_top_k'],
                                                                   eval_type="softmax" if self.trainer_params['select_top_k']>1 else "argmax",
                                                                   aug_factor=1)
-                    if "TSP" not in self.args.problem: self.metric_logger.dummy_size.update(env.dummy_size, batch_size)
+                    if "TSP" not in self.args.problem and self.problem != "SOP": self.metric_logger.dummy_size.update(env.dummy_size, batch_size)
             else:
                 cons_reward = torch.stack(reward).sum(0)
             if self.trainer_params["baseline"] == "share":
@@ -638,7 +647,7 @@ class Trainer:
             else:
                 cons_log_prob = None
             improve_loss, improve_reward, select_idx, best_solution, best_reward, is_improved = self._improvement(env, self.trainer_params["epsilon"], cons_reward, batch_reward, weights, cons_log_prob)
-            # if "TSP" not in self.args.problem: self.metric_logger.dummy_size.update(env.dummy_size, batch_size)
+            # if "TSP" not in self.args.problem and self.problem != "SOP": self.metric_logger.dummy_size.update(env.dummy_size, batch_size)
         else:
             improve_loss, improve_reward, select_idx, best_solution = torch.tensor(0.0), None, None, None
         # if self.rank==0: print(f"Rank {self.rank} >> improvement time: ", time.time() - tik)
@@ -699,7 +708,7 @@ class Trainer:
             reset_state, _, _ = env.reset()
             state, reward, done = env.pre_step()
             # pre-forward using the best solution (batch_size, 1, solution_length)
-            if "TSP" not in self.args.problem: best_solution = get_solution_with_dummy_depot(best_solution, env.problem_size)
+            if "TSP" not in self.args.problem and self.problem != "SOP": best_solution = get_solution_with_dummy_depot(best_solution, env.problem_size)
             best_solution_rec = sol2rec(best_solution).view(batch_size, -1)
             _, context, _, _ = env.get_costs(best_solution_rec, get_context=True)
             try:
@@ -877,152 +886,157 @@ class Trainer:
             # self.trainer_params["select_top_k"] = env.problem_size
         print("rollout_size", rollout_size)
 
-        with torch.no_grad():
-            if not (self.trainer_params["improvement_only"] and self.trainer_params["val_init_sol_strategy"] == "POMO"):
-                env.load_problems(batch_size, rollout_size=rollout_size, problems=data, aug_factor=aug_factor)
-                reset_state, _, _ = env.reset()
+        with torch.inference_mode():
+            with torch.amp.autocast("cuda") if "cuda" in str(self.device) else torch.inference_mode():
+                if not (self.trainer_params["improvement_only"] and self.trainer_params["val_init_sol_strategy"] == "POMO"):
+                    env.load_problems(batch_size, rollout_size=rollout_size, problems=data, aug_factor=aug_factor)
+                    reset_state, _, _ = env.reset()
 
-                state, reward, done = env.pre_step()
-            ###########################################Construction########################################
-            if not self.model_params["improvement_only"]:
-                if self.rank == 0: tik = time.time()
-                z = self.sample_z_vectors(batch_size * aug_factor, starting_points, z_dim, z_sample_size, rollout_size)  if self.model_params["polynet"] else None
-                try:
-                    self.model.module.pre_forward(reset_state, z)
-                    if self.model_params["pip_decoder"] and (self.lazy_model is not None) and (not self.is_train_pip_decoder):
-                        # ATTENTION: only use the predicted mask for validation when not training?
-                        self.lazy_model.module.eval()
-                        self.lazy_model.pre_forward(reset_state)
-                except:
-                    self.model.pre_forward(reset_state, z)
-                    if self.model_params["pip_decoder"] and (self.lazy_model is not None) and (not self.is_train_pip_decoder):
-                        # ATTENTION: only use the predicted mask for validation when not training?
-                        self.lazy_model.eval()
-                        self.lazy_model.pre_forward(reset_state)
-                while not done:
-                    use_predicted_PI_mask = True if (self.model_params['pip_decoder'] and not self.is_train_pip_decoder) else False
-                    # print(use_predicted_PI_mask)
-                    if self.model_params["pip_decoder"] and self.lazy_model is not None and not (self.is_train_pip_decoder) and env.selected_count >= 1:
-                        use_predicted_PI_mask = self.lazy_model(state, candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None, use_predicted_PI_mask=False, no_select_prob=True)
-                    selected, prob, _ = self.model(state, pomo=self.env_params["pomo_start"],
-                                                candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None,
-                                                use_predicted_PI_mask=use_predicted_PI_mask)
-                    # shape: (batch, pomo)
-                    if self.model_params['pip_decoder']:
-                        _, probs_sl = prob
-                        if self.model_params['pip_decoder'] and (env.selected_count >= 1) and (env.selected_count < env.problem_size - 1):
-                            label = torch.where(env.simulated_ninf_flag == float('-inf'), 1., env.simulated_ninf_flag)
-                            visited_mask = (env.visited_ninf_flag == float('-inf'))
-                            label = label[~visited_mask]
-                            probs_sl = probs_sl[~visited_mask]
-                            pred_LIST = np.append(pred_LIST, probs_sl.detach().cpu().numpy())
-                            label_LIST = np.append(label_LIST, label.detach().cpu().numpy())
-                    # ATTENTION: PIP-D always generate PI mask during validation
-                    generate_PI_mask = True if self.model_params['pip_decoder'] else self.trainer_params["generate_PI_mask"]
-                    # print(generate_PI_mask)
-                    use_predicted_PI_mask = ((not isinstance(use_predicted_PI_mask, bool) or use_predicted_PI_mask == True) or not self.trainer_params["use_real_PI_mask"])
-                    state, reward, done, infeasible = env.step(selected,
-                                                               out_reward = (self.tester_params["best_solution_path"] is not None),
-                                                               soft_constrained = self.trainer_params["soft_constrained"],
-                                                               backhaul_mask = self.trainer_params["backhaul_mask"],
-                                                               generate_PI_mask=generate_PI_mask,
-                                                               use_predicted_PI_mask=use_predicted_PI_mask,
-                                                               pip_step=self.trainer_params["pip_step"]
-                                                               )
-                # Return
-                aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, best_solution = self._get_construction_output_val(aug_factor * sample_size, infeasible, reward, env.selected_node_list)
-                if self.rank==0: print(f"Rank {self.rank} >> val construction time: ", time.time() - tik)
-            ###########################################Improvement########################################
-            if self.trainer_params["validation_improve_steps"] > 0.:
-                if self.model_params["clean_cache"]: torch.cuda.empty_cache()
-                # self.model.decoder.k = None
-                # self.model.decoder.v = None
-                if self.rank==0: tik = time.time()
-                if self.model_params["improvement_only"]:  # generate random solution
-                    if self.trainer_params["val_init_sol_strategy"] != "POMO":
-                        env.get_initial_solutions(strategy=self.trainer_params["val_init_sol_strategy"], k=self.env_params["pomo_size"], max_dummy_size=self.trainer_params["max_dummy_size"])
-                        self._get_construction_output_val(aug_factor, env.infeasible, env._get_travel_distance(), env.selected_node_list)
-                    else:
-                        self._get_pomo_initial_solution(env, data, batch_size, rollout_size, eval_type="argmax", aug_factor=aug_factor, val=True)
-                # FIXME: should we use cost+penalty?
-                aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, best_solution, is_improved = self._val_improvement(env, aug_factor * sample_size, -env._get_travel_distance(), best_solution=best_solution if self.tester_params["best_solution_path"] is not None else None) # after construction and improvement
-                if self.rank==0: print(f"Rank {self.rank} >> val improvement time: ", time.time() - tik)
-            ##########################################RE-Construction#######################################
-            if self.args.problem == "VRPBLTW" and self.trainer_params["validation_improve_steps"] > 0. and self.trainer_params["reconstruct"]:  # reconstruct after improvement
-                if self.rank == 0: tik = time.time()
-                # reconstruct the solution (env already load problem)
-                reset_state, _, _ = env.reset()
-                state, reward, done = env.pre_step()
-                # pre-forward using the best solution (batch_size, 1, solution_length)
-                if "TSP" not in self.args.problem: best_solution = get_solution_with_dummy_depot(best_solution, env.problem_size)
-                best_solution_rec = sol2rec(best_solution).view(batch_size, -1).repeat(aug_factor,1)
-                _, context, _, _ = env.get_costs(best_solution_rec, get_context=True)
-                try:
-                    self.model.module.pre_forward_rc(env, best_solution_rec, context)
-                except:
-                    self.model.pre_forward_rc(env, best_solution_rec, context)
-                while not done:
-                    selected, _, _ = self.model(state, pomo=self.env_params["pomo_start"], candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None)
-                    # shape: (batch, pomo)
-                    state, reward, done, infeasible = env.step(selected, soft_constrained = self.trainer_params["soft_constrained"], backhaul_mask = self.trainer_params["backhaul_mask"])
-                # Retur
-                aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible = self._get_reconstruction_output_val(aug_factor, infeasible, reward, aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible)
-                if self.rank == 0: print(f"Rank {self.rank} >> val reconstruction time: ", time.time() - tik)
-            ###########################################RE-Improvement########################################
-            if self.trainer_params["val_reconstruct_times"] > 1.:
-                if self.model_params["clean_cache"]: torch.cuda.empty_cache()
-                # self.model.decoder.k = None
-                # self.model.decoder.v = None
-                if self.rank==0: tik = time.time()
-                if self.model_params["improvement_only"]:  # generate random solution
-                    if self.trainer_params["val_init_sol_strategy"] != "POMO":
-                        env.get_initial_solutions(strategy=self.trainer_params["val_init_sol_strategy"], k=self.env_params["pomo_size"], max_dummy_size=self.trainer_params["max_dummy_size"])
-                        self._get_construction_output_val(aug_factor, env.infeasible, env._get_travel_distance())
-                    else:
-                        self._get_pomo_initial_solution(env, data, batch_size, rollout_size, eval_type="argmax", aug_factor=aug_factor, val=True)
-                env.dummy_xy = None
-                aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, best_solution, is_improved = self._val_reimprovement(env, aug_factor, aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible) # after construction and improvement
-                if self.rank==0: print(f"Rank {self.rank} >> val reimprovement time: ", time.time() - tik)
-            #############################Use mask to construct the solutions again###################################
-            if self.model_params["problem"] == "VRPBLTW" and self.tester_params["aux_mask"]:
-                if self.rank==0: tik = time.time()
-                # reconstruct the solution (env already load problem)
-                reset_state, _, _ = env.reset()
-                state, reward, done = env.pre_step()
-                z = self.sample_z_vectors(batch_size * aug_factor, starting_points, z_dim, z_sample_size, rollout_size) if self.model_params["polynet"] else None
+                    state, reward, done = env.pre_step()
+                ###########################################Construction########################################
                 if not self.model_params["improvement_only"]:
+                    if self.rank == 0: tik = time.time()
+                    z = self.sample_z_vectors(batch_size * aug_factor, starting_points, z_dim, z_sample_size, rollout_size)  if self.model_params["polynet"] else None
                     try:
                         self.model.module.pre_forward(reset_state, z)
+                        if self.model_params["pip_decoder"] and (self.lazy_model is not None) and (not self.is_train_pip_decoder):
+                            # ATTENTION: only use the predicted mask for validation when not training?
+                            self.lazy_model.module.eval()
+                            self.lazy_model.pre_forward(reset_state)
                     except:
                         self.model.pre_forward(reset_state, z)
+                        if self.model_params["pip_decoder"] and (self.lazy_model is not None) and (not self.is_train_pip_decoder):
+                            # ATTENTION: only use the predicted mask for validation when not training?
+                            self.lazy_model.eval()
+                            self.lazy_model.pre_forward(reset_state)
                     while not done:
-                        selected, _, _ = self.model(state, pomo=self.env_params["pomo_start"], candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None)
+                        use_predicted_PI_mask = True if (self.model_params['pip_decoder'] and not self.is_train_pip_decoder) else False
+                        # print(use_predicted_PI_mask)
+                        if self.model_params["pip_decoder"] and self.lazy_model is not None and not (self.is_train_pip_decoder) and env.selected_count >= 1:
+                            use_predicted_PI_mask = self.lazy_model(state, candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None, use_predicted_PI_mask=False, no_select_prob=True)
+                        selected, prob, _ = self.model(state, pomo=self.env_params["pomo_start"],
+                                                    candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None,
+                                                    use_predicted_PI_mask=use_predicted_PI_mask)
                         # shape: (batch, pomo)
-                        state, reward, done, infeasible = env.step(selected, soft_constrained = False, backhaul_mask = "hard")
+                        if self.model_params['pip_decoder']:
+                            _, probs_sl = prob
+                            if self.model_params['pip_decoder'] and (env.selected_count >= 1) and (env.selected_count < env.problem_size - 1):
+                                label = torch.where(env.simulated_ninf_flag == float('-inf'), 1., env.simulated_ninf_flag)
+                                visited_mask = (env.visited_ninf_flag == float('-inf'))
+                                label = label[~visited_mask]
+                                probs_sl = probs_sl[~visited_mask]
+                                pred_LIST = np.append(pred_LIST, probs_sl.detach().cpu().numpy())
+                                label_LIST = np.append(label_LIST, label.detach().cpu().numpy())
+                        # ATTENTION: PIP-D always generate PI mask during validation
+                        generate_PI_mask = True if self.model_params['pip_decoder'] else self.trainer_params["generate_PI_mask"]
+                        # print(generate_PI_mask)
+                        use_predicted_PI_mask = ((not isinstance(use_predicted_PI_mask, bool) or use_predicted_PI_mask == True) or not self.trainer_params["use_real_PI_mask"])
+                        state, reward, done, infeasible = env.step(selected,
+                                                                   out_reward = (self.tester_params["best_solution_path"] is not None),
+                                                                   soft_constrained = self.trainer_params["soft_constrained"],
+                                                                   backhaul_mask = self.trainer_params["backhaul_mask"],
+                                                                   generate_PI_mask=generate_PI_mask,
+                                                                   use_predicted_PI_mask=use_predicted_PI_mask,
+                                                                   pip_step=self.trainer_params["pip_step"]
+                                                                   )
+            # Return
+            aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, best_solution = self._get_construction_output_val(aug_factor * sample_size, infeasible, reward, env.selected_node_list)
+            print(env._get_travel_distance().size())
+            solution_saved = env.selected_node_list.reshape(aug_factor, batch_size, -1)
+            if self.rank==0: print(f"Rank {self.rank} >> val construction time: ", time.time() - tik)
+        ###########################################Improvement########################################
+        if self.trainer_params["validation_improve_steps"] > 0.:
+            if self.model_params["clean_cache"]: torch.cuda.empty_cache()
+            # self.model.decoder.k = None
+            # self.model.decoder.v = None
+            if self.rank==0: tik = time.time()
+            if self.model_params["improvement_only"]:  # generate random solution
+                if self.trainer_params["val_init_sol_strategy"] != "POMO":
+                    env.get_initial_solutions(strategy=self.trainer_params["val_init_sol_strategy"], k=self.env_params["pomo_size"], max_dummy_size=self.trainer_params["max_dummy_size"])
+                    self._get_construction_output_val(aug_factor, env.infeasible, env._get_travel_distance(), env.selected_node_list)
                 else:
-                    try:
-                        self.pomo_model.module.pre_forward(reset_state, z)
-                    except:
-                        self.pomo_model.pre_forward(reset_state, z)
-                    while not done:
-                        selected, _, _ = self.pomo_model(state, pomo=self.env_params["pomo_start"], candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None)
-                        # shape: (batch, pomo)
-                        state, reward, done, infeasible = env.step(selected, soft_constrained = False, backhaul_mask = "hard")
-                # Obtain the minimal feasible reward
+                    self._get_pomo_initial_solution(env, data, batch_size, rollout_size, eval_type="argmax", aug_factor=aug_factor, val=True)
+            # FIXME: should we use cost+penalty?
+            aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, best_solution, is_improved = self._val_improvement(env, aug_factor * sample_size, -env._get_travel_distance(), best_solution=best_solution if self.tester_params["best_solution_path"] is not None else None) # after construction and improvement
+            if self.rank==0: print(f"Rank {self.rank} >> val improvement time: ", time.time() - tik)
+        ##########################################RE-Construction#######################################
+        if self.args.problem == "VRPBLTW" and self.trainer_params["validation_improve_steps"] > 0. and self.trainer_params["reconstruct"]:  # reconstruct after improvement
+            if self.rank == 0: tik = time.time()
+            # reconstruct the solution (env already load problem)
+            reset_state, _, _ = env.reset()
+            state, reward, done = env.pre_step()
+            # pre-forward using the best solution (batch_size, 1, solution_length)
+            if "TSP" not in self.args.problem and self.problem != "SOP": best_solution = get_solution_with_dummy_depot(best_solution, env.problem_size)
+            best_solution_rec = sol2rec(best_solution).view(batch_size, -1).repeat(aug_factor,1)
+            _, context, _, _ = env.get_costs(best_solution_rec, get_context=True)
+            try:
+                self.model.module.pre_forward_rc(env, best_solution_rec, context)
+            except:
+                self.model.pre_forward_rc(env, best_solution_rec, context)
+            while not done:
+                selected, _, _ = self.model(state, pomo=self.env_params["pomo_start"], candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None)
+                # shape: (batch, pomo)
+                state, reward, done, infeasible = env.step(selected, soft_constrained = self.trainer_params["soft_constrained"], backhaul_mask = self.trainer_params["backhaul_mask"])
+            # Retur
+            aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible = self._get_reconstruction_output_val(aug_factor, infeasible, reward, aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible)
+            if self.rank == 0: print(f"Rank {self.rank} >> val reconstruction time: ", time.time() - tik)
+        ###########################################RE-Improvement########################################
+        if self.trainer_params["val_reconstruct_times"] > 1.:
+            if self.model_params["clean_cache"]: torch.cuda.empty_cache()
+            # self.model.decoder.k = None
+            # self.model.decoder.v = None
+            if self.rank==0: tik = time.time()
+            if self.model_params["improvement_only"]:  # generate random solution
+                if self.trainer_params["val_init_sol_strategy"] != "POMO":
+                    env.get_initial_solutions(strategy=self.trainer_params["val_init_sol_strategy"], k=self.env_params["pomo_size"], max_dummy_size=self.trainer_params["max_dummy_size"])
+                    self._get_construction_output_val(aug_factor, env.infeasible, env._get_travel_distance())
+                else:
+                    self._get_pomo_initial_solution(env, data, batch_size, rollout_size, eval_type="argmax", aug_factor=aug_factor, val=True)
+            env.dummy_xy = None
+            aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, best_solution, is_improved = self._val_reimprovement(env, aug_factor, aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible) # after construction and improvement
+            if self.rank==0: print(f"Rank {self.rank} >> val reimprovement time: ", time.time() - tik)
+        #############################Use mask to construct the solutions again###################################
+        if self.model_params["problem"] == "VRPBLTW" and self.tester_params["aux_mask"]:
+            if self.rank==0: tik = time.time()
+            # reconstruct the solution (env already load problem)
+            reset_state, _, _ = env.reset()
+            state, reward, done = env.pre_step()
+            z = self.sample_z_vectors(batch_size * aug_factor, starting_points, z_dim, z_sample_size, rollout_size) if self.model_params["polynet"] else None
+            with torch.inference_mode():
+                with torch.amp.autocast("cuda") if "cuda" in str(self.device) else torch.inference_mode():
+                    if not self.model_params["improvement_only"]:
+                        try:
+                            self.model.module.pre_forward(reset_state, z)
+                        except:
+                            self.model.pre_forward(reset_state, z)
+                        while not done:
+                            selected, _, _ = self.model(state, pomo=self.env_params["pomo_start"], candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None)
+                            # shape: (batch, pomo)
+                            state, reward, done, infeasible = env.step(selected, soft_constrained = False, backhaul_mask = "hard")
+                    else:
+                        try:
+                            self.pomo_model.module.pre_forward(reset_state, z)
+                        except:
+                            self.pomo_model.pre_forward(reset_state, z)
+                        while not done:
+                            selected, _, _ = self.pomo_model(state, pomo=self.env_params["pomo_start"], candidate_feature=env.node_tw_end if self.args.problem == "TSPTW" else None)
+                            # shape: (batch, pomo)
+                            state, reward, done, infeasible = env.step(selected, soft_constrained = False, backhaul_mask = "hard")
+            # Obtain the minimal feasible reward
 
-                if sample_size > 1:
-                    reward = reward.view(sample_size,-1, 1)
-                    infeasible = infeasible.view(sample_size,-1, 1)
-                    reward_masked = reward.masked_fill(infeasible, -1e10)
-                    reward = reward.max(dim=0)[0]
-                    infeasible = infeasible.all(dim=0)
-                self._supplement_construction(aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, aug_factor, infeasible, reward)
-                if self.rank==0: print(f"Rank {self.rank} >> val reconstruction time [w. mask]: ", time.time() - tik)
+            if sample_size > 1:
+                reward = reward.view(sample_size,-1, 1)
+                infeasible = infeasible.view(sample_size,-1, 1)
+                reward_masked = reward.masked_fill(infeasible, -1e10)
+                reward = reward.max(dim=0)[0]
+                infeasible = infeasible.all(dim=0)
+            self._supplement_construction(aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, aug_factor, infeasible, reward)
+            if self.rank==0: print(f"Rank {self.rank} >> val reconstruction time [w. mask]: ", time.time() - tik)
 
         if self.model_params["pip_decoder"]:
             return [pred_LIST, label_LIST]
         else:
-            return None
+            return solution_saved
 
     def _val_one_batch_with_eas(self, data, env, aug_factor=1, eval_type="argmax"):
         sample_size = 1
@@ -1228,7 +1242,7 @@ class Trainer:
             reset_state, _, _ = env.reset()
             state, reward, done = env.pre_step()
             # pre-forward using the best solution (batch_size, 1, solution_length)
-            if "TSP" not in self.args.problem: best_solution = get_solution_with_dummy_depot(best_solution, env.problem_size)
+            if "TSP" not in self.args.problem and self.problem != "SOP": best_solution = get_solution_with_dummy_depot(best_solution, env.problem_size)
             best_solution_rec = sol2rec(best_solution).view(batch_size, -1).repeat(aug_factor, 1)
             _, context, _, _ = env.get_costs(best_solution_rec, get_context=True)
             try:
@@ -1310,10 +1324,11 @@ class Trainer:
         # val_sampler = DistributedSampler(data, num_replicas=self.world_size, rank=self.rank)
         # val_loader = DataLoader(dataset=data, batch_size=batch_size // self.world_size, shuffle=False, sampler=val_sampler)
         #
-        # with torch.no_grad():
-        #     for batch in val_loader:
-        #         batch = batch.to(self.rank)
-        #         self._val_one_batch(batch, env, aug_factor=8, eval_type="argmax")
+        # with torch.inference_mode():
+        #     with torch.amp.autocast("cuda") if "cuda" in str(self.device) else torch.inference_mode():
+        #         for batch in val_loader:
+        #             batch = batch.to(self.rank)
+        #             self._val_one_batch(batch, env, aug_factor=8, eval_type="argmax")
         if self.tester_params["eval_only"]: self.time_estimator.reset()
         episode = 0
 
@@ -1324,17 +1339,30 @@ class Trainer:
             data = env.load_dataset(path_, offset=episode, num_samples=bs)
             print(self.model_params["eval_type"])
             # env_params = {'problem_size': node_xy.size(1), 'pomo_size': node_xy.size(1), 'loc_scaler': loc_scaler
-            env.pomo_size = data[2].size(1)
-            env.problem_size = data[2].size(1)
-            env.loc_scaler = 1000
+            # env.pomo_size = data[0].size(1)
+            # env.problem_size = data[0].size(1)
+            # env.loc_scaler = 1000
 
             if self.tester_params['EAS_params']['enable']:
                 output = self._val_one_batch_with_eas(data, env, aug_factor=8, eval_type=self.model_params["eval_type"])
             else:
                 output = self._val_one_batch(data, env, aug_factor=8, eval_type=self.model_params["eval_type"])
-            if output is not None:
+
+            if isinstance(output, list):
                 pred_LIST = np.append(pred_LIST, output[0])
                 label_LIST = np.append(label_LIST, output[1])
+            # else:
+            #     try:
+            #         # assert sample_size == 1, "Need checking..."
+            #         # assert env.pomo_size == 1, "Need checking..."
+            #         solution_saved = torch.cat([solution_saved, output], dim=1)
+            #         print(solution_saved.size())
+            #     except:
+            #         solution_saved = output
+            #         print(solution_saved.size())
+            #     # if solution_saved.size(1) == self.tester_params["test_episodes"]:
+            #     #     torch.save(solution_saved, "./cvrpbltw100_with_initialTourbyPOMOstar.pt")
+            #     #     print("saved!")
 
             if self.tester_params['refinement_history_path'] is not None:
                 if episode == 0:
@@ -1343,14 +1371,20 @@ class Trainer:
                     self.val_metric_logger.best_feasible_all = self.val_metric_logger.best_feasible
                     self.val_metric_logger.feasible_bsf_history = self.val_metric_logger.refinement_feasible_bsf_history # 0~batch, 2+T
                     self.val_metric_logger.reward_history = self.val_metric_logger.refinement_reward_bsf_history # 0~batch, 2+T
+                    # self.val_metric_logger.solution_history = self.val_metric_logger.refinement_solution_history[:,0].reshape(8, batch_size, 1, -1).transpose(1, 2).reshape(8 * 1, batch_size, -1)
                     self.val_metric_logger.solution_history = self.val_metric_logger.refinement_solution_history # 0~batch, 2+T, solution_size
+                    self.val_metric_logger.refinement_penalty_history = self.val_metric_logger.penalty_history # AUG, BATCH, 2+T
+                    self.val_metric_logger.refinement_travel_distance_history = self.val_metric_logger.travel_distance_history # AUG, BATCH, 2+T
                 else:
                     self.val_metric_logger.best_solution_all = pad_and_cat_dim([self.val_metric_logger.best_solution_all, self.val_metric_logger.best_solution])
                     self.val_metric_logger.best_reward_all = torch.cat([self.val_metric_logger.best_reward_all, self.val_metric_logger.best_reward], dim=0)
                     self.val_metric_logger.best_feasible_all = torch.cat([self.val_metric_logger.best_feasible_all, self.val_metric_logger.best_feasible], dim=0)
                     self.val_metric_logger.feasible_bsf_history = torch.cat([self.val_metric_logger.feasible_bsf_history, self.val_metric_logger.refinement_feasible_bsf_history], dim=0)
                     self.val_metric_logger.reward_history = torch.cat([self.val_metric_logger.reward_history, self.val_metric_logger.refinement_reward_bsf_history], dim=0)
+                    # self.val_metric_logger.solution_history = torch.cat([self.val_metric_logger.solution_history, self.val_metric_logger.refinement_solution_history[:,0].reshape(8, batch_size, 1, -1).transpose(1, 2).reshape(8 * 1, batch_size, -1)], dim=1)
                     self.val_metric_logger.solution_history = pad_and_cat_dim([self.val_metric_logger.solution_history, self.val_metric_logger.refinement_solution_history])
+                    self.val_metric_logger.refinement_penalty_history = torch.cat([self.val_metric_logger.refinement_penalty_history, self.val_metric_logger.penalty_history], dim=1)
+                    self.val_metric_logger.refinement_travel_distance_history = torch.cat([self.val_metric_logger.refinement_travel_distance_history, self.val_metric_logger.travel_distance_history], dim=1)
             episode += bs
 
 
@@ -1383,6 +1417,42 @@ class Trainer:
             opt_sol = load_dataset(sol_path, disable_print=True)[: val_episodes]
             grid_factor = 100. if self.args.problem == "TSPTW" else 1.
             opt_sol = torch.tensor([i[0]/grid_factor for i in opt_sol])
+
+            # import json
+            # with open('/home/jieyi/milp_zoo/OptiGuide/milp-evolve/src/milp_evolve_llm/vrptwb_results_1000_instances_new.json', 'r') as f:
+            #     json_data = json.load(f)
+            # solution = pad_to_tensor([reconstruct_flattened_route_no_extra_zeros(entry["solution_edges"]) for entry in json_data])
+            # rec = sol2rec(solution.unsqueeze(1)).view(batch_size, -1)
+            # env0 = copy.deepcopy(env)
+            # path_ = os.path.join(dir, val_path) if not self.tester_params["is_lib"] else val_path
+            # data = env.load_dataset(path_, offset=0, num_samples=1000)
+            # env0.load_problems(batch_size, 1, problems=data, aug_factor=1)
+            # env0.selected_node_list = solution.unsqueeze(1)
+            # env0._get_travel_distance()
+            # out_node_penalty = env0.get_costs(rec, get_context=True)[3]
+            # feasible = (out_node_penalty.sum(0) == 0).bool()
+            # print(out_node_penalty.size())
+            # print("Feasible count:", (out_node_penalty.sum(0) == 0).sum())
+            # best_obj = torch.tensor([entry["best_obj"]/1000 for entry in json_data])
+            # best_bound = torch.tensor([entry["best_bound"] / 1000 for entry in json_data])
+            # best_obj0 = env0._get_travel_distance().view(-1)
+
+            # print("Best obj0 gap:", ((self.val_metric_logger.reconstruct_masked_metrics["aug_score"][feasible] -best_obj0[feasible]) / best_obj0[feasible]).mean() * 100)
+            # print("Best obj gap:", ((self.val_metric_logger.reconstruct_masked_metrics["aug_score"][feasible] - best_obj[feasible]) / best_obj[feasible]).mean() * 100)
+            # print("Best bound gap:", ((self.val_metric_logger.reconstruct_masked_metrics["aug_score"][feasible] - best_bound[feasible]) / best_bound[feasible]).mean() * 100)
+            # print("Best or tools gap:", ((self.val_metric_logger.reconstruct_masked_metrics["aug_score"][feasible] - opt_sol[feasible]) / opt_sol[feasible]).mean() * 100)
+
+            # for per in range(2, self.trainer_params["validation_improve_steps"] + 2, 2):
+            #     cost = torch.where(self.val_metric_logger.feasible_bsf_history[:, 2:],
+            #                        self.val_metric_logger.reward_history[:, 2:], float("inf"))
+            #     cost = cost[:, :per + 1].min(dim=-1)[0]
+            #     infsb = (cost == float('inf')).sum() / 1000 * 100
+            #     cost_ = cost[~torch.isinf(cost)]
+            #     opt_sol_ = opt_sol[~torch.isinf(cost)]
+            #     gap = (cost_ - opt_sol_) / opt_sol_ * 100
+            #     print(f'Avg best fsb gap after T={per} steps:'.center(35), '{:<10f} +- {:<10f} ({:.1f}%)'.format(
+            #         gap.mean(), torch.std(gap) / math.sqrt(batch_size), infsb))
+
             self.val_metric_logger._calculate_gap(self, opt_sol)
             try:
                 if self.rank==0: print(f'Rank {self.rank} >> Val Score on {val_path}: [Construction] NO_AUG_Score: {self.val_metric_logger.construct_metrics["no_aug_score_list"]}, NO_AUG_Gap: {self.val_metric_logger.construct_metrics["no_aug_gap_list"]}% --> AUG_Score: {self.val_metric_logger.construct_metrics["aug_score_list"]}, AUG_Gap: {self.val_metric_logger.construct_metrics["aug_gap_list"]}%; Infeasible rate: {self.val_metric_logger.construct_metrics["sol_infeasible_rate_list"]}% (solution-level), {self.val_metric_logger.construct_metrics["ins_infeasible_rate_list"]}% (instance-level)')
@@ -1400,6 +1470,47 @@ class Trainer:
             if self.rank==0 and self.trainer_params["validation_improve_steps"] > 0.: print(f'Rank {self.rank} >> Val Score on {val_path}: [Improvement] NO_AUG_Score: {self.val_metric_logger.improve_metrics["no_aug_score_list"]}, --> AUG_Score: {self.val_metric_logger.improve_metrics["aug_score_list"]}; Infeasible rate: {self.val_metric_logger.improve_metrics["sol_infeasible_rate_list"]}% (solution-level), {self.val_metric_logger.improve_metrics["ins_infeasible_rate_list"]}% (instance-level)')
             if self.rank == 0 and self.args.problem == "VRPBLTW" and self.trainer_params["validation_improve_steps"] > 0. and self.trainer_params["reconstruct"]: print(f'Rank {self.rank} >> Val Score on {val_path}: [w/o mask] NO_AUG_Score: {self.val_metric_logger.reconstruct_metrics["no_aug_score_list"]} --> AUG_Score: {self.val_metric_logger.reconstruct_metrics["aug_score_list"]}; Infeasible rate: {self.val_metric_logger.reconstruct_metrics["sol_infeasible_rate_list"]}% (solution-level), {self.val_metric_logger.reconstruct_metrics["ins_infeasible_rate_list"]}% (instance-level)')
             if self.rank==0 and self.tester_params["aux_mask"]: print(f'Rank {self.rank} >> Val Score on {val_path}: [w. mask] NO_AUG_Score: {self.val_metric_logger.reconstruct_masked_metrics["no_aug_score_list"]}, --> AUG_Score: {self.val_metric_logger.reconstruct_masked_metrics["aug_score_list"]}; Infeasible rate: {self.val_metric_logger.reconstruct_masked_metrics["sol_infeasible_rate_list"]}% (solution-level), {self.val_metric_logger.reconstruct_masked_metrics["ins_infeasible_rate_list"]}% (instance-level)')
+        #
+        # from similarity import find_best_solutions_and_trajectories
+        # best_solutions, best_penalties, best_distances, best_solution_trajectories, best_indices = find_best_solutions_and_trajectories(
+        #     penalty_history=self.val_metric_logger.refinement_penalty_history.reshape(8, 10000, -1)[:,:,1:],
+        #     distance_history=self.val_metric_logger.refinement_travel_distance_history.reshape(8, 10000, -1)[:,:,1:],
+        #     solution_history=self.val_metric_logger.solution_history.reshape(8, 10000, -1, 100))
+        # values, counts = torch.unique(best_indices[:,1], return_counts=True)
+        # values = values.cpu().numpy()
+        # counts = counts.cpu().numpy()
+        # df = pd.DataFrame({
+        #     "value": values,
+        #     "count": counts
+        # })
+        # df.to_excel("step_best_value_counts.xlsx", index=False)
+        # plt.figure(figsize=(8, 5))
+        # plt.bar(values, counts)
+        # plt.xlabel("Value")
+        # plt.ylabel("Count")
+        # plt.title("Frequency of Values in Tensor")
+        # plt.tight_layout()
+        # plt.savefig("step_barplot.pdf")
+        # plt.show()
+        # torch.save(best_solution_trajectories, "TSPTW100_best_solution_trajectories.pt")
+        # torch.save(best_indices, "TSPTW100_best_indices.pt")
+        # torch.save(best_distances, "TSPTW100_best_distances.pt")
+        # torch.save(best_penalties, "TSPTW100_best_penalties.pt")
+        # torch.save(best_solutions, "TSPTW100_best_solutions.pt")
+        # torch.save(self.val_metric_logger.solution_history, f"./TSPTW100_{self.tester_params['refinement_history_path']}.pt")
+        # print("SAVE", self.val_metric_logger.solution_history.size())
+
+        # sol = self.val_metric_logger.solution_history.reshape(8, self.tester_params["sample_size"], val_episodes, -1)[0]
+        # torch.save(sol, f"./{self.tester_params['refinement_history_path']}.pt")
+        # print("SAVE", sol.size())
+        # start = sol[..., :-1]
+        # nxt = sol[..., 1:]
+        # route_start = (start == 0) & (nxt != 0)
+        # noaug_num_vehicles = route_start.sum(dim=-1).float()
+        # print(f"{noaug_num_vehicles.mean()} +- {noaug_num_vehicles.std()}")
+        # from diversity import compute_solution_diversity
+        # metrics = ['edge_jaccard']
+        # results1 = compute_solution_diversity(None, metrics, sol)
 
     def _improvement(self, env, epsilon=None, cons_reward=None, batch_reward=None, weights=None, cons_log_prob=None):
         amp_training = self.trainer_params['amp_training']
@@ -1411,6 +1522,9 @@ class Trainer:
                 solution, select_idx = select4improve(solution, cons_reward, strategy=self.trainer_params["select_strategy"],
                                                       K=self.trainer_params["select_top_k"], rnd_prob=self.trainer_params["stochastic_probability"],
                                                       diversity=self.trainer_params["diversity"])
+                if self.trainer_params["repeats"] > 1:
+                    solution = torch.repeat_interleave(solution, repeats=self.trainer_params["repeats"], dim=1)
+                    select_idx = torch.repeat_interleave(select_idx, repeats=self.trainer_params["repeats"], dim=1)
                 # solution shape: (batch, k, solution); solution_idx shape: (batch, k)
                 feasibility_history = torch.gather(~env.infeasible, 1, select_idx)
                 if self.trainer_params["neighborhood_search"]:
@@ -1427,7 +1541,7 @@ class Trainer:
             select_idx = torch.arange(env.pomo_size)[None, :].repeat(env.batch_size, 1)
             feasibility_history = ~env.infeasible
 
-        if "TSP" not in self.args.problem: solution = get_solution_with_dummy_depot(solution, env.problem_size)
+        if "TSP" not in self.args.problem and self.problem != "SOP": solution = get_solution_with_dummy_depot(solution, env.problem_size)
         batch_size, k, solution_size = solution.size()
         rec = sol2rec(solution).view(batch_size * k, -1)
 
@@ -1456,7 +1570,7 @@ class Trainer:
             # in this case, the selected solutions will not be the best
             best_reward, best_index = (-cons_reward.reshape(batch_size, env.pomo_size)).min(-1)
             best_solution = env.selected_node_list.reshape(batch_size, env.pomo_size, -1)[torch.arange(batch_size),best_index, :].clone()
-            if "TSP" not in self.args.problem: best_solution = get_solution_with_dummy_depot(best_solution.view(batch_size, 1, -1), env.problem_size)
+            if "TSP" not in self.args.problem and self.problem != "SOP": best_solution = get_solution_with_dummy_depot(best_solution.view(batch_size, 1, -1), env.problem_size)
             rec_best = sol2rec(best_solution).view(batch_size, -1)
         else:
             rec_best = rec.view(batch_size, k, -1)[torch.arange(batch_size),best_index,:].clone()
@@ -1475,7 +1589,7 @@ class Trainer:
         T_pi = self.trainer_params["dummy_improve_steps"]
         '''
         logics for use the top T steps (improved reward) among T_pi steps to update the improvement model:
-        1. with torch.no_grad(): conduct T_pi-steps improvements, record [the metrics w/o gradient] and the model input (rec, context, context2, action)
+        1. with torch.inference_mode(): conduct T_pi-steps improvements, record [the metrics w/o gradient] and the model input (rec, context, context2, action)
         Note: only record top T improved reward
         To achieve this: maintain a list of the index of top T steps and select them afterwards (remember to extend that to the batch_rewards)
         2. rerun the improvement step with top T model inputs, and get log p with gradient 
@@ -1486,46 +1600,47 @@ class Trainer:
         if T_pi > 0:
             # step 1: rollout
             rec_list, context_list, context2_list, action_list, entropy = [], [], [], [], []
-            with torch.no_grad():
-                while t < T_pi:
-                    state = (env, rec, context, context2, action)
-                    rec_list.append(rec)
-                    context_list.append(context)
-                    context2_list.append(context2)
-                    action_list.append(action)
-                    if self.model_params["use_LoRA"] and t >= self.trainer_params["LoRA_begin_step"]: use_LoRA = True
-                    with torch.amp.autocast(device_type="cuda", enabled=amp_training):
-                        action, _, entro_p, improvement_method = self.model(state, solver="improvement", require_entropy=True, use_LoRA=use_LoRA)
-                    entropy.append(entro_p)
-                    # state transient
-                    rec, rewards, obj, feasibility_history, context, context2, info, out_penalty, out_node_penalty = env.improvement_step(
-                        rec, action, obj, feasibility_history, t,
-                        improvement_method=improvement_method, epsilon=self.trainer_params["epsilon"],
-                        seperate_obj_penalty=self.trainer_params["seperate_obj_penalty"],
-                        weights=weights, out_reward=self.trainer_params["out_reward"],
-                        penalty_factor=self.lambda_, penalty_normalize=self.trainer_params["penalty_normalize"],
-                        insert_before=self.trainer_params["insert_before"],
-                        non_linear=self.trainer_params["non_linear"], n2s_decoder=self.model_params["n2s_decoder"])
-                    if self.trainer_params["bonus_for_construction"] or self.trainer_params["extra_bonus"] or self.trainer_params["imitation_learning"] or (self.args.problem == "VRPBLTW" and self.trainer_params["reconstruct"]):
-                        # update best solution
-                        criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (
-                                    obj[0] + obj[1]).clone()
-                        new_best, best_index = criterion[:, 0].view(batch_size, k).min(-1)
-                        index = new_best < best_reward
-                        best_reward[index] = new_best[index]  # update best reward
-                        is_improved = (is_improved | index)
-                        rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size), best_index, :][index].clone()  # update best solution
-                    memory.rewards.append(rewards)
-                    criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (obj[0] + obj[1]).clone()
-                    memory.obj.append(criterion.clone())
-                    memory.out_node_penalty.append(out_node_penalty)  # (c, b*k)
-                    memory.out_penalty.append(out_penalty)  # (c, b*k)
-                    feasible = out_penalty.sum(0) <= 0.0
-                    soft_infeasible = (out_penalty.sum(0) <= epsilon) & (out_penalty.sum(0) > 0.)
-                    memory.feasible.append(feasible)
-                    memory.soft_feasible.append(soft_infeasible)
-                    # next
-                    t = t + 1
+            with torch.inference_mode():
+                with torch.amp.autocast("cuda") if "cuda" in str(self.device) else torch.inference_mode():
+                    while t < T_pi:
+                        state = (env, rec, context, context2, action)
+                        rec_list.append(rec)
+                        context_list.append(context)
+                        context2_list.append(context2)
+                        action_list.append(action)
+                        if self.model_params["use_LoRA"] and t >= self.trainer_params["LoRA_begin_step"]: use_LoRA = True
+                        with torch.amp.autocast(device_type="cuda", enabled=amp_training):
+                            action, _, entro_p, improvement_method = self.model(state, solver="improvement", require_entropy=True, use_LoRA=use_LoRA)
+                        entropy.append(entro_p)
+                        # state transient
+                        rec, rewards, obj, feasibility_history, context, context2, info, out_penalty, out_node_penalty = env.improvement_step(
+                            rec, action, obj, feasibility_history, t,
+                            improvement_method=improvement_method, epsilon=self.trainer_params["epsilon"],
+                            seperate_obj_penalty=self.trainer_params["seperate_obj_penalty"],
+                            weights=weights, out_reward=self.trainer_params["out_reward"],
+                            penalty_factor=self.lambda_, penalty_normalize=self.trainer_params["penalty_normalize"],
+                            insert_before=self.trainer_params["insert_before"],
+                            non_linear=self.trainer_params["non_linear"], n2s_decoder=self.model_params["n2s_decoder"])
+                        if self.trainer_params["bonus_for_construction"] or self.trainer_params["extra_bonus"] or self.trainer_params["imitation_learning"] or (self.args.problem == "VRPBLTW" and self.trainer_params["reconstruct"]):
+                            # update best solution
+                            criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (
+                                        obj[0] + obj[1]).clone()
+                            new_best, best_index = criterion[:, 0].view(batch_size, k).min(-1)
+                            index = new_best < best_reward
+                            best_reward[index] = new_best[index]  # update best reward
+                            is_improved = (is_improved | index)
+                            rec_best[index] = rec.view(batch_size, k, -1)[torch.arange(batch_size), best_index, :][index].clone()  # update best solution
+                        memory.rewards.append(rewards)
+                        criterion = obj.clone() if not self.trainer_params["seperate_obj_penalty"] else (obj[0] + obj[1]).clone()
+                        memory.obj.append(criterion.clone())
+                        memory.out_node_penalty.append(out_node_penalty)  # (c, b*k)
+                        memory.out_penalty.append(out_penalty)  # (c, b*k)
+                        feasible = out_penalty.sum(0) <= 0.0
+                        soft_infeasible = (out_penalty.sum(0) <= epsilon) & (out_penalty.sum(0) > 0.)
+                        memory.feasible.append(feasible)
+                        memory.soft_feasible.append(soft_infeasible)
+                        # next
+                        t = t + 1
             # step 2: select the top T reward
             rollout_reward = torch.stack(memory.rewards)
             if self.trainer_params["dummy_improve_selected"] == "topk":
@@ -1762,268 +1877,274 @@ class Trainer:
 
     def _val_improvement(self, env, aug_factor, cons_reward, best_solution=None):
 
-        with torch.no_grad():
-            # solution/rec shape: (batch, pomo, solution)
-            solution = env.selected_node_list.clone()
+        with torch.inference_mode():
+            with torch.amp.autocast("cuda") if "cuda" in str(self.device) else torch.inference_mode():
+                # solution/rec shape: (batch, pomo, solution)
+                solution = env.selected_node_list.clone()
 
-            if not self.trainer_params["improvement_only"]:  # if yes, already generate k solutions for each instance
-                # select top k
-                # if self.trainer_params["select_top_k_val"] == 1 and best_solution is not None:
-                #     batch_size = best_solution.size(0)
-                #     solution = best_solution.clone().view(batch_size, 1, -1)
-                #     feasibility_history = self.val_metric_logger.best_feasible[-batch_size:].clone().view(batch_size, 1)
-                # else:
-                # FIXME: why not select the best in the feasible ones then the most feasible ones among the infeasible
-                if self.trainer_params["select_top_k_val"] <= env.pomo_size:
-                    solution, select_idx = select4improve(solution, cons_reward,
-                                                          strategy=self.trainer_params["select_strategy"],
-                                                          K=self.trainer_params["select_top_k_val"],
-                                                          rnd_prob=self.trainer_params["stochastic_probability"],
-                                                          diversity=self.trainer_params["diversity"])
-                    # solution shape: (batch, k, solution); solution_idx shape: (batch, k)
-                    feasibility_history = torch.gather(~env.infeasible, 1, select_idx)
-                    if self.trainer_params["neighborhood_search"]:
-                        cons_log_prob = cons_log_prob[torch.arange(env.batch_size)[:, None], select_idx]
-                        _, unconfident_indices = torch.topk(cons_log_prob, k=self.trainer_params["k_unconfident"], dim=-1, largest=False)
+                if not self.trainer_params["improvement_only"]:  # if yes, already generate k solutions for each instance
+                    # select top k
+                    # if self.trainer_params["select_top_k_val"] == 1 and best_solution is not None:
+                    #     batch_size = best_solution.size(0)
+                    #     solution = best_solution.clone().view(batch_size, 1, -1)
+                    #     feasibility_history = self.val_metric_logger.best_feasible[-batch_size:].clone().view(batch_size, 1)
+                    # else:
+                    # FIXME: why not select the best in the feasible ones then the most feasible ones among the infeasible
+                    if self.trainer_params["select_top_k_val"] <= env.pomo_size:
+                        solution, select_idx = select4improve(solution, cons_reward,
+                                                              strategy=self.trainer_params["select_strategy"],
+                                                              K=self.trainer_params["select_top_k_val"],
+                                                              rnd_prob=self.trainer_params["stochastic_probability"],
+                                                              diversity=self.trainer_params["diversity"])
+                        # solution shape: (batch, k, solution); solution_idx shape: (batch, k)
+                        feasibility_history = torch.gather(~env.infeasible, 1, select_idx)
+                        if self.trainer_params["neighborhood_search"]:
+                            cons_log_prob = cons_log_prob[torch.arange(env.batch_size)[:, None], select_idx]
+                            _, unconfident_indices = torch.topk(cons_log_prob, k=self.trainer_params["k_unconfident"], dim=-1, largest=False)
+                    else:
+                        # just for testing
+                        select_idx = torch.arange(env.pomo_size)[None, :].repeat(env.batch_size, 1)
+                        feasibility_history = ~env.infeasible
+                        _, topk2 = select4improve(solution, cons_reward, strategy=self.trainer_params["select_strategy"],
+                                                  K=5, rnd_prob=self.trainer_params["stochastic_probability"],
+                                                  diversity=self.trainer_params["diversity"])
+                    feasibility_history_clone = feasibility_history.clone()
                 else:
-                    # just for testing
                     select_idx = torch.arange(env.pomo_size)[None, :].repeat(env.batch_size, 1)
                     feasibility_history = ~env.infeasible
-                    _, topk2 = select4improve(solution, cons_reward, strategy=self.trainer_params["select_strategy"],
-                                              K=5, rnd_prob=self.trainer_params["stochastic_probability"],
-                                              diversity=self.trainer_params["diversity"])
-                feasibility_history_clone = feasibility_history.clone()
-            else:
-                select_idx = torch.arange(env.pomo_size)[None, :].repeat(env.batch_size, 1)
-                feasibility_history = ~env.infeasible
-                feasibility_history_clone = feasibility_history.clone()
+                    feasibility_history_clone = feasibility_history.clone()
 
 
-            if "TSP" not in self.args.problem: solution = get_solution_with_dummy_depot(solution, env.problem_size)
-            batch_size, pomo_size, solution_size = solution.size() # batch_size = aug_factor * batch_size
-            print(solution.size())
-            rec = sol2rec(solution).view(batch_size * pomo_size, -1)
+                if "TSP" not in self.args.problem and self.problem != "SOP": solution = get_solution_with_dummy_depot(solution, env.problem_size)
+                batch_size, pomo_size, solution_size = solution.size() # batch_size = aug_factor * batch_size
+                print(solution.size())
+                rec = sol2rec(solution).view(batch_size * pomo_size, -1)
 
-            # preapare input
-            obj, context, out_penalty, out_node_penalty = env.get_costs(rec, get_context=True) # obj only
-            obj = torch.cat((obj[:, None], obj[:, None], obj[:, None]), -1).clone()
-            # obj = obj.unsqueeze(-1).expand(-1, -1, 3)
-            total_history = self.trainer_params["total_history"]
-            if self.model_params["n2s_decoder"]:
-                context2 = torch.zeros(batch_size * pomo_size, 4, solution_size)
-                feasibility_history = torch.zeros(batch_size * pomo_size, total_history, solution_size)
-            else:
-                context2 = torch.zeros(batch_size * pomo_size, 9)
-                context2[:, -1] = (feasibility_history).view(-1) # current feasibility
-                feasibility_history = (feasibility_history).view(-1, 1).expand(batch_size * pomo_size, total_history)
-            action = None
-            best_reward, best_index = (obj[:, 0].view(batch_size//aug_factor, aug_factor*pomo_size)).min(-1)
-            rec_best = rec.view(batch_size//aug_factor, aug_factor*pomo_size, -1)[torch.arange(batch_size//aug_factor), best_index, :].clone()
-            # print(f"!!!!!!!constructed best: {remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size)[:3]}")
-            is_improved = torch.zeros(batch_size//aug_factor).bool()
+                # preapare input
+                obj, context, out_penalty, out_node_penalty = env.get_costs(rec, get_context=True) # obj only
+                obj = torch.cat((obj[:, None], obj[:, None], obj[:, None]), -1).clone()
+                # obj = obj.unsqueeze(-1).expand(-1, -1, 3)
+                total_history = self.trainer_params["total_history"]
+                if self.model_params["n2s_decoder"]:
+                    context2 = torch.zeros(batch_size * pomo_size, 4, solution_size)
+                    feasibility_history = torch.zeros(batch_size * pomo_size, total_history, solution_size)
+                else:
+                    context2 = torch.zeros(batch_size * pomo_size, 9)
+                    context2[:, -1] = (feasibility_history).view(-1) # current feasibility
+                    feasibility_history = (feasibility_history).view(-1, 1).expand(batch_size * pomo_size, total_history)
+                action = None
+                best_reward, best_index = (obj[:, 0].view(batch_size//aug_factor, aug_factor*pomo_size)).min(-1)
+                rec_best = rec.view(batch_size//aug_factor, aug_factor*pomo_size, -1)[torch.arange(batch_size//aug_factor), best_index, :].clone()
+                # print(f"!!!!!!!constructed best: {remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size)[:3]}")
+                is_improved = torch.zeros(batch_size//aug_factor).bool()
 
-            if self.tester_params["refinement_history_path"] is not None:
-                tmp_obj = reshape_aug_view(obj[:, 0].clone(), batch_size, aug_factor, pomo_size)
-                rewardd = tmp_obj.unsqueeze(-1)
-                tmp_solution = reshape_aug_solution(remove_dummy_depot_from_solution(rec2sol(rec).unsqueeze(1), env.problem_size), batch_size, aug_factor, pomo_size).clone()
-                tmp_penalty = reshape_aug_view(out_penalty.sum(0) + out_node_penalty.sum(0), batch_size, aug_factor, pomo_size).clone()
-                tmp_feasible = reshape_aug_view((out_penalty.sum(0) + out_node_penalty.sum(0)) < 1e-5, batch_size, aug_factor, pomo_size).clone()
-                fsbb = tmp_feasible.unsqueeze(-1)
-                new_best_reward, new_feasible, new_best_solution = cal_best_aug_batch(
-                    dist=tmp_obj.T,
-                    solution=tmp_solution.transpose(0, 1),
-                    penalty=tmp_penalty.T,
-                    feasible=tmp_feasible.T
-                )
-
-                update_best_records(
-                        best_reward=self.val_metric_logger.best_reward,
-                        best_feasible=self.val_metric_logger.best_feasible,
-                        best_solution=self.val_metric_logger.best_solution,
-                        new_reward = new_best_reward,
-                        new_feasible = new_feasible,
-                        new_solution = new_best_solution
-                )
-
-                self.val_metric_logger.refinement_reward_bsf_history = torch.cat([self.val_metric_logger.refinement_reward_bsf_history, self.val_metric_logger.best_reward.unsqueeze(-1)], dim=-1)
-                self.val_metric_logger.refinement_feasible_bsf_history = torch.cat([self.val_metric_logger.refinement_feasible_bsf_history, self.val_metric_logger.best_feasible.unsqueeze(-1)], dim=-1)
-                self.val_metric_logger.refinement_solution_history = remove_dummy_depot_from_solution(rec2sol(rec).unsqueeze(1), env.problem_size).unsqueeze(1) #batch, 0~T, solution
-            # sample trajectory
-            t = 0
-            T = self.trainer_params["validation_improve_steps"]
-            use_LoRA = False
-            # memory = Memory()
-            # initial solution from construction
-            feasible_all = ((feasibility_history_clone).view(-1)).int()
-            min_scores = torch.full((batch_size * pomo_size,), float('inf'))
-            min_scores = torch.where(feasible_all.bool(), obj[:, 0], min_scores).clone()
-            out_node_penalties = torch.full((batch_size * pomo_size,), float('inf'))
-            # if self.args.problem == "CVRP":
-            #     out_node_penalty = (context[2] > 1.00001).sum(-1)
-            # elif self.args.problem == "TSPTW":
-            #     out_node_penalty = (torch.clamp_min(context[1] - context[-1], 0.0) > 1e-5).sum(-1) # (b*k)
-            out_node_penalties = torch.where(~(feasible_all.bool()), out_node_penalty, out_node_penalties).clone()
-            del out_node_penalty
-            out_penalties = torch.full((batch_size * pomo_size,), float('inf'))
-            # if self.args.problem == "CVRP":
-            #     out_penalty = ((context[3] - 1.00001) * (context[3] > 1.00001)).sum(dim=1)
-            # elif self.args.problem == "TSPTW":
-            #     out_penalty = torch.clamp_min(context[1] - context[-1], 0.0).sum(-1)
-            #     if self.trainer_params["penalty_normalize"]:
-            #         try:
-            #             out_penalty = out_penalty / context[-1][:, 0]
-            #         except:
-            #             out_penalty = out_penalty / context[-1][:, :1]
-            out_penalties = torch.where(~(feasible_all.bool()), out_penalty, out_penalties).clone()
-            del out_penalty
-
-            while t < T:
-                # print(t)
-
-                state = (env, rec, context, context2, action)
-
-                if self.model_params["use_LoRA"] and t >= self.trainer_params["LoRA_begin_step"]: use_LoRA = True
-                action, _, improvement_method = self.model(state, solver="improvement", require_entropy=False, use_LoRA=use_LoRA)
-
-                # state transient
-                # rec, rewards, obj, feasibility_history, context, context2, info
-                rec, _, obj, feasibility_history, context, context2, _, out_penalty, out_node_penalty = env.improvement_step(rec, action, obj, feasibility_history, t,
-                                                                                                                       improvement_method = improvement_method, insert_before=self.trainer_params["insert_before"], n2s_decoder=self.model_params["n2s_decoder"])
-                # update best solution
-                tmp_obj = obj[:, 0].clone().reshape(aug_factor, batch_size // aug_factor, pomo_size).permute(1, 0, 2).reshape(batch_size // aug_factor, aug_factor * pomo_size)
-                best_reward, best_index = (tmp_obj).min(-1)
-                new_best, best_index = tmp_obj.min(-1)
-                index = new_best < best_reward
-                best_reward[index] = new_best[index]  # update best reward
-                is_improved = (is_improved | index)
-                tmp_rec = rec.reshape(aug_factor, batch_size // aug_factor, pomo_size, -1).permute(1, 0, 2, 3).reshape(batch_size // aug_factor, aug_factor * pomo_size, -1)
-                rec_best[index] = tmp_rec[torch.arange(batch_size//aug_factor), best_index, :][index].clone()  # update best solution
                 if self.tester_params["refinement_history_path"] is not None:
                     tmp_obj = reshape_aug_view(obj[:, 0].clone(), batch_size, aug_factor, pomo_size)
-                    tmp_solution = reshape_aug_solution(remove_dummy_depot_from_solution(rec2sol(rec).unsqueeze(1), env.problem_size), batch_size, aug_factor,pomo_size).clone()
-                    tmp_penalty = reshape_aug_view(out_penalty.sum(0) + out_node_penalty.sum(0), batch_size, aug_factor,pomo_size).clone()
-                    tmp_feasible = reshape_aug_view((out_penalty.sum(0) + out_node_penalty.sum(0)) < 1e-5, batch_size, aug_factor,pomo_size).clone()
-                    rewardd = torch.cat([rewardd, tmp_obj.unsqueeze(-1)], dim=-1)
-                    fsbb = torch.cat([fsbb, tmp_feasible.unsqueeze(-1)], dim=-1)
+                    rewardd = tmp_obj.unsqueeze(-1)
+                    tmp_solution = reshape_aug_solution(remove_dummy_depot_from_solution(rec2sol(rec).unsqueeze(1), env.problem_size), batch_size, aug_factor, pomo_size).clone()
+                    tmp_penalty = reshape_aug_view(out_penalty.sum(0) + out_node_penalty.sum(0), batch_size, aug_factor, pomo_size).clone()
+                    tmp_feasible = reshape_aug_view((out_penalty.sum(0) + out_node_penalty.sum(0)) < 1e-5, batch_size, aug_factor, pomo_size).clone()
+                    fsbb = tmp_feasible.unsqueeze(-1)
                     new_best_reward, new_feasible, new_best_solution = cal_best_aug_batch(
                         dist=tmp_obj.T,
                         solution=tmp_solution.transpose(0, 1),
                         penalty=tmp_penalty.T,
                         feasible=tmp_feasible.T
                     )
-
+                    self.val_metric_logger.penalty_history = torch.cat([self.val_metric_logger.penalty_history, tmp_penalty.transpose(0,1).unsqueeze(-1)], dim=-1)
+                    self.val_metric_logger.travel_distance_history = torch.cat([self.val_metric_logger.travel_distance_history, tmp_obj.transpose(0,1).unsqueeze(-1)], dim=-1)
                     update_best_records(
-                        best_reward=self.val_metric_logger.best_reward,
-                        best_feasible=self.val_metric_logger.best_feasible,
-                        best_solution=self.val_metric_logger.best_solution,
-                        new_reward=new_best_reward,
-                        new_feasible=new_feasible,
-                        new_solution=new_best_solution
+                            best_reward=self.val_metric_logger.best_reward,
+                            best_feasible=self.val_metric_logger.best_feasible,
+                            best_solution=self.val_metric_logger.best_solution,
+                            new_reward = new_best_reward,
+                            new_feasible = new_feasible,
+                            new_solution = new_best_solution
                     )
-                    self.val_metric_logger.refinement_reward_bsf_history = torch.cat(
-                        [self.val_metric_logger.refinement_reward_bsf_history,
-                         self.val_metric_logger.best_reward.unsqueeze(-1)], dim=-1)
-                    self.val_metric_logger.refinement_feasible_bsf_history = torch.cat(
-                        [self.val_metric_logger.refinement_feasible_bsf_history,
-                         self.val_metric_logger.best_feasible.unsqueeze(-1)], dim=-1)
-                    self.val_metric_logger.refinement_solution_history = torch.cat([
-                        self.val_metric_logger.refinement_solution_history,
-                         remove_dummy_depot_from_solution(rec2sol(rec).unsqueeze(1), env.problem_size).unsqueeze(1)], dim=1
-                    )# batch, T, solution
-                # memory.obj.append(obj.clone())
-                # memory.cum_demand.append(context[2])
-                # memory.partial_sum_wrt_route_plan.append(context[3])
-                # non_feasible_cost_total = torch.clamp_min(context[-1] - 1.00001, 0.0).sum(-1)
-                # feasible = non_feasible_cost_total <= 0.0
-                # memory.feasible.append(feasible)
+
+                    self.val_metric_logger.refinement_reward_bsf_history = torch.cat([self.val_metric_logger.refinement_reward_bsf_history, self.val_metric_logger.best_reward.unsqueeze(-1)], dim=-1)
+                    self.val_metric_logger.refinement_feasible_bsf_history = torch.cat([self.val_metric_logger.refinement_feasible_bsf_history, self.val_metric_logger.best_feasible.unsqueeze(-1)], dim=-1)
+                    self.val_metric_logger.refinement_solution_history = remove_dummy_depot_from_solution(rec2sol(rec).unsqueeze(1), env.problem_size).unsqueeze(1) #batch, 0~T, solution
+                # sample trajectory
+                t = 0
+                T = self.trainer_params["validation_improve_steps"]
+                use_LoRA = False
+                # memory = Memory()
+                # initial solution from construction
+                feasible_all = ((feasibility_history_clone).view(-1)).int()
+                min_scores = torch.full((batch_size * pomo_size,), float('inf'))
+                min_scores = torch.where(feasible_all.bool(), obj[:, 0], min_scores).clone()
+                out_node_penalties = torch.full((batch_size * pomo_size,), float('inf'))
                 # if self.args.problem == "CVRP":
-                #     non_feasible_cost_total = torch.clamp_min(context[-1] - 1.00001, 0.0).sum(-1)
+                #     out_node_penalty = (context[2] > 1.00001).sum(-1)
                 # elif self.args.problem == "TSPTW":
-                #     non_feasible_cost_total = torch.clamp_min(context[1] - context[-1], 0.0).sum(-1)
-                #     if self.trainer_params["penalty_normalize"]:
-                #         try:
-                #             non_feasible_cost_total = non_feasible_cost_total / context[-1][:, 0]
-                #         except:
-                #             non_feasible_cost_total = non_feasible_cost_total / context[-1][:, :1]
-                feasible = out_penalty.sum(0) <= 0.0
-                feasible_all += feasible.int()
-                # Update scores with current step's results
-                min_scores = torch.where(feasible, torch.min(min_scores, obj[:, 0]), min_scores).clone()
-
-                # Update out_node_penalties and out_penalties
+                #     out_node_penalty = (torch.clamp_min(context[1] - context[-1], 0.0) > 1e-5).sum(-1) # (b*k)
+                out_node_penalties = torch.where(~(feasible_all.bool()), out_node_penalty, out_node_penalties).clone()
+                del out_node_penalty
+                out_penalties = torch.full((batch_size * pomo_size,), float('inf'))
                 # if self.args.problem == "CVRP":
-                #     current_out_node_penalty = (context[2] > 1.00001).sum(-1)
-                #     # current_out_penalty = (context[3] - 1.00001).clamp(min=0).sum(dim=-1)
-                #     current_out_penalty = ((context[3] - 1.00001) * (context[3] > 1.00001)).sum(dim=1)
-                # elif self.args.problem == "TSPTW":  # arrival_time - tw_end
-                #     current_out_penalty = torch.clamp_min(context[1] - context[-1], 0.0).sum(-1)
+                #     out_penalty = ((context[3] - 1.00001) * (context[3] > 1.00001)).sum(dim=1)
+                # elif self.args.problem == "TSPTW":
+                #     out_penalty = torch.clamp_min(context[1] - context[-1], 0.0).sum(-1)
                 #     if self.trainer_params["penalty_normalize"]:
                 #         try:
-                #             current_out_penalty = current_out_penalty / context[-1][:, 0]
+                #             out_penalty = out_penalty / context[-1][:, 0]
                 #         except:
-                #             current_out_penalty = current_out_penalty / context[-1][:, :1]
-                #     current_out_node_penalty = (torch.clamp_min(context[1] - context[-1], 0.0) > 1e-5).sum(-1)  # (b*k)
-                out_node_penalties = torch.min(out_node_penalties, out_node_penalty.sum(0)).clone()
-                out_penalties = torch.min(out_penalties, out_penalty.sum(0)).clone()
+                #             out_penalty = out_penalty / context[-1][:, :1]
+                out_penalties = torch.where(~(feasible_all.bool()), out_penalty, out_penalties).clone()
+                del out_penalty
 
-                # next
-                t = t + 1
+                while t < T:
+                    # print(t)
 
-            # calculate infeasible outputs (BSF during improvement)
-            # feasible_all = torch.stack(memory.feasible) # shape: (T, aug*batch*pomo)
-            # feasible = feasible_all.any(0)# shape: (aug*batch*pomo)
-            feasible = feasible_all > 0 # shape: (aug*batch*pomo)
-            aug_feasible = feasible.reshape(aug_factor, -1, pomo_size).any(dim=0).any(dim=-1) # shape: (batch,)
-            no_aug_feasible = feasible.reshape(aug_factor, -1, pomo_size)[0].any(dim=-1) # shape: (batch,)
-            self.val_metric_logger._improve_tensor_update("aug_feasible", aug_feasible)
-            self.val_metric_logger._improve_tensor_update("no_aug_feasible", no_aug_feasible)
-            sol_infeasible_rate = 1. - (feasible.sum() / (batch_size * pomo_size)) # batch_size = aug*batch
-            ins_infeasible_rate = 1. - aug_feasible.sum() / (batch_size//aug_factor)
-            self.val_metric_logger.improve_metrics["sol_infeasible_rate"].update(sol_infeasible_rate, batch_size * pomo_size)
-            self.val_metric_logger.improve_metrics["ins_infeasible_rate"].update(ins_infeasible_rate, batch_size // aug_factor)
+                    state = (env, rec, context, context2, action)
 
-            # score = cost
-            # score = torch.stack(memory.obj)[:, :, 0] # after each improvement step, shape: (T, aug*batch*pomo)
-            # score_fsb = torch.where(~feasible_all, 1e10, score) # make the infeasible one to be a very large value
-            # score_fsb = score_fsb.min(dim=0)[0].reshape(aug_factor, -1, pomo_size) # best during improvement
-            # aug_score_fsb = score_fsb.min(dim=-1)[0].min(dim=0)[0] # shape: (batch,)
-            # no_aug_score_fsb = score_fsb.min(dim=-1)[0][0]  # shape: (batch,)
-            min_scores = min_scores.view(aug_factor, -1, pomo_size)
-            aug_score_fsb = min_scores.min(dim=-1)[0].min(dim=0)[0]
-            no_aug_score_fsb = min_scores[0].min(dim=-1)[0]
-            self.val_metric_logger._improve_tensor_update("aug_score", aug_score_fsb)
-            self.val_metric_logger._improve_tensor_update("no_aug_score", no_aug_score_fsb)
+                    if self.model_params["use_LoRA"] and t >= self.trainer_params["LoRA_begin_step"]: use_LoRA = True
+                    action, _, improvement_method = self.model(state, solver="improvement", require_entropy=False, use_LoRA=use_LoRA)
 
-            # penalty
-            # out_node_penalty = (torch.stack(memory.cum_demand)> 1.00001).sum(dim=-1) # (T, aug*batch*pomo)
-            # out_node_penalty = out_node_penalty.min(dim=0)[0].reshape(aug_factor, -1, pomo_size)# best during improvement, shape: ( aug,batch,pomo)
-            # no_aug_out_nodes = out_node_penalty[0].min(dim=-1)[0] # shape: (batch,)
-            # aug_out_nodes = out_node_penalty.min(dim=0)[0].min(dim=-1)[0] # shape: (batch,)
-            # partial_sum_wrt_route_plan = torch.stack(memory.partial_sum_wrt_route_plan)
-            # out_penalty = ((partial_sum_wrt_route_plan - 1.00001) * (partial_sum_wrt_route_plan > 1.00001)).sum(dim=-1) # (T, aug*batch*pomo)
-            # out_penalty = out_penalty.min(dim=0)[0].reshape(aug_factor, -1, pomo_size)  # best during improvement, shape: (aug,batch,pomo)
-            # no_aug_out = out_penalty[0].min(dim=-1)[0] # shape: (batch,)
-            # aug_out = out_penalty.min(dim=0)[0].min(dim=-1)[0] # shape: (batch,)
-            out_node_penalties = out_node_penalties.view(aug_factor, -1, pomo_size)
-            no_aug_out_nodes = out_node_penalties[0].min(dim=-1)[0]
-            aug_out_nodes = out_node_penalties.min(dim=0)[0].min(dim=-1)[0]
-            out_penalties = out_penalties.view(aug_factor, -1, pomo_size)
-            no_aug_out = out_penalties[0].min(dim=-1)[0]
-            aug_out = out_penalties.min(dim=0)[0].min(dim=-1)[0]
-            self.val_metric_logger._improve_tensor_update("no_aug_out", no_aug_out)
-            self.val_metric_logger._improve_tensor_update("no_aug_out_nodes", no_aug_out_nodes)
-            self.val_metric_logger._improve_tensor_update("aug_out", aug_out)
-            self.val_metric_logger._improve_tensor_update("aug_out_nodes", aug_out_nodes)
+                    # state transient
+                    # rec, rewards, obj, feasibility_history, context, context2, info
+                    rec, _, obj, feasibility_history, context, context2, _, out_penalty, out_node_penalty = env.improvement_step(rec, action, obj, feasibility_history, t,
+                                                                                                                           improvement_method = improvement_method, insert_before=self.trainer_params["insert_before"], n2s_decoder=self.model_params["n2s_decoder"])
+                    # update best solution
+                    tmp_obj = obj[:, 0].clone().reshape(aug_factor, batch_size // aug_factor, pomo_size).permute(1, 0, 2).reshape(batch_size // aug_factor, aug_factor * pomo_size)
+                    best_reward, best_index = (tmp_obj).min(-1)
+                    new_best, best_index = tmp_obj.min(-1)
+                    index = new_best < best_reward
+                    best_reward[index] = new_best[index]  # update best reward
+                    is_improved = (is_improved | index)
+                    tmp_rec = rec.reshape(aug_factor, batch_size // aug_factor, pomo_size, -1).permute(1, 0, 2, 3).reshape(batch_size // aug_factor, aug_factor * pomo_size, -1)
+                    rec_best[index] = tmp_rec[torch.arange(batch_size//aug_factor), best_index, :][index].clone()  # update best solution
+                    if self.tester_params["refinement_history_path"] is not None:
+                        tmp_obj = reshape_aug_view(obj[:, 0].clone(), batch_size, aug_factor, pomo_size)
+                        tmp_solution = reshape_aug_solution(remove_dummy_depot_from_solution(rec2sol(rec).unsqueeze(1), env.problem_size), batch_size, aug_factor,pomo_size).clone()
+                        tmp_penalty = reshape_aug_view(out_penalty.sum(0) + out_node_penalty.sum(0), batch_size, aug_factor,pomo_size).clone()
+                        tmp_feasible = reshape_aug_view((out_penalty.sum(0) + out_node_penalty.sum(0)) < 1e-5, batch_size, aug_factor,pomo_size).clone()
+                        rewardd = torch.cat([rewardd, tmp_obj.unsqueeze(-1)], dim=-1)
+                        fsbb = torch.cat([fsbb, tmp_feasible.unsqueeze(-1)], dim=-1)
+                        new_best_reward, new_feasible, new_best_solution = cal_best_aug_batch(
+                            dist=tmp_obj.T,
+                            solution=tmp_solution.transpose(0, 1),
+                            penalty=tmp_penalty.T,
+                            feasible=tmp_feasible.T
+                        )
+                        self.val_metric_logger.penalty_history = torch.cat(
+                            [self.val_metric_logger.penalty_history, tmp_penalty.transpose(0, 1).unsqueeze(-1)], dim=-1)
+                        self.val_metric_logger.travel_distance_history = torch.cat(
+                            [self.val_metric_logger.travel_distance_history, tmp_obj.transpose(0,1).unsqueeze(-1)], dim=-1)
+                        update_best_records(
+                            best_reward=self.val_metric_logger.best_reward,
+                            best_feasible=self.val_metric_logger.best_feasible,
+                            best_solution=self.val_metric_logger.best_solution,
+                            new_reward=new_best_reward,
+                            new_feasible=new_feasible,
+                            new_solution=new_best_solution
+                        )
+                        self.val_metric_logger.refinement_reward_bsf_history = torch.cat(
+                            [self.val_metric_logger.refinement_reward_bsf_history,
+                             self.val_metric_logger.best_reward.unsqueeze(-1)], dim=-1)
+                        self.val_metric_logger.refinement_feasible_bsf_history = torch.cat(
+                            [self.val_metric_logger.refinement_feasible_bsf_history,
+                             self.val_metric_logger.best_feasible.unsqueeze(-1)], dim=-1)
+                        self.val_metric_logger.refinement_solution_history = torch.cat([
+                            self.val_metric_logger.refinement_solution_history,
+                             remove_dummy_depot_from_solution(rec2sol(rec).unsqueeze(1), env.problem_size).unsqueeze(1)], dim=1
+                        )# batch, T, solution
+                    # memory.obj.append(obj.clone())
+                    # memory.cum_demand.append(context[2])
+                    # memory.partial_sum_wrt_route_plan.append(context[3])
+                    # non_feasible_cost_total = torch.clamp_min(context[-1] - 1.00001, 0.0).sum(-1)
+                    # feasible = non_feasible_cost_total <= 0.0
+                    # memory.feasible.append(feasible)
+                    # if self.args.problem == "CVRP":
+                    #     non_feasible_cost_total = torch.clamp_min(context[-1] - 1.00001, 0.0).sum(-1)
+                    # elif self.args.problem == "TSPTW":
+                    #     non_feasible_cost_total = torch.clamp_min(context[1] - context[-1], 0.0).sum(-1)
+                    #     if self.trainer_params["penalty_normalize"]:
+                    #         try:
+                    #             non_feasible_cost_total = non_feasible_cost_total / context[-1][:, 0]
+                    #         except:
+                    #             non_feasible_cost_total = non_feasible_cost_total / context[-1][:, :1]
+                    feasible = out_penalty.sum(0) <= 0.0
+                    feasible_all += feasible.int()
+                    # Update scores with current step's results
+                    min_scores = torch.where(feasible, torch.min(min_scores, obj[:, 0]), min_scores).clone()
 
-            # end update
-            # memory.clear_memory()
+                    # Update out_node_penalties and out_penalties
+                    # if self.args.problem == "CVRP":
+                    #     current_out_node_penalty = (context[2] > 1.00001).sum(-1)
+                    #     # current_out_penalty = (context[3] - 1.00001).clamp(min=0).sum(dim=-1)
+                    #     current_out_penalty = ((context[3] - 1.00001) * (context[3] > 1.00001)).sum(dim=1)
+                    # elif self.args.problem == "TSPTW":  # arrival_time - tw_end
+                    #     current_out_penalty = torch.clamp_min(context[1] - context[-1], 0.0).sum(-1)
+                    #     if self.trainer_params["penalty_normalize"]:
+                    #         try:
+                    #             current_out_penalty = current_out_penalty / context[-1][:, 0]
+                    #         except:
+                    #             current_out_penalty = current_out_penalty / context[-1][:, :1]
+                    #     current_out_node_penalty = (torch.clamp_min(context[1] - context[-1], 0.0) > 1e-5).sum(-1)  # (b*k)
+                    out_node_penalties = torch.min(out_node_penalties, out_node_penalty.sum(0)).clone()
+                    out_penalties = torch.min(out_penalties, out_penalty.sum(0)).clone()
 
-            # torch.save(rewardd, "rewardd_car_pomo.pt")
-            # torch.save(fsbb, "fsb_car_pomo.pt")
+                    # next
+                    t = t + 1
 
-            return aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size//aug_factor, 1, -1), env.problem_size), is_improved
+                # calculate infeasible outputs (BSF during improvement)
+                # feasible_all = torch.stack(memory.feasible) # shape: (T, aug*batch*pomo)
+                # feasible = feasible_all.any(0)# shape: (aug*batch*pomo)
+                feasible = feasible_all > 0 # shape: (aug*batch*pomo)
+                aug_feasible = feasible.reshape(aug_factor, -1, pomo_size).any(dim=0).any(dim=-1) # shape: (batch,)
+                no_aug_feasible = feasible.reshape(aug_factor, -1, pomo_size)[0].any(dim=-1) # shape: (batch,)
+                self.val_metric_logger._improve_tensor_update("aug_feasible", aug_feasible)
+                self.val_metric_logger._improve_tensor_update("no_aug_feasible", no_aug_feasible)
+                sol_infeasible_rate = 1. - (feasible.sum() / (batch_size * pomo_size)) # batch_size = aug*batch
+                ins_infeasible_rate = 1. - aug_feasible.sum() / (batch_size//aug_factor)
+                self.val_metric_logger.improve_metrics["sol_infeasible_rate"].update(sol_infeasible_rate, batch_size * pomo_size)
+                self.val_metric_logger.improve_metrics["ins_infeasible_rate"].update(ins_infeasible_rate, batch_size // aug_factor)
+
+                # score = cost
+                # score = torch.stack(memory.obj)[:, :, 0] # after each improvement step, shape: (T, aug*batch*pomo)
+                # score_fsb = torch.where(~feasible_all, 1e10, score) # make the infeasible one to be a very large value
+                # score_fsb = score_fsb.min(dim=0)[0].reshape(aug_factor, -1, pomo_size) # best during improvement
+                # aug_score_fsb = score_fsb.min(dim=-1)[0].min(dim=0)[0] # shape: (batch,)
+                # no_aug_score_fsb = score_fsb.min(dim=-1)[0][0]  # shape: (batch,)
+                min_scores = min_scores.view(aug_factor, -1, pomo_size)
+                aug_score_fsb = min_scores.min(dim=-1)[0].min(dim=0)[0]
+                no_aug_score_fsb = min_scores[0].min(dim=-1)[0]
+                self.val_metric_logger._improve_tensor_update("aug_score", aug_score_fsb)
+                self.val_metric_logger._improve_tensor_update("no_aug_score", no_aug_score_fsb)
+
+                # penalty
+                # out_node_penalty = (torch.stack(memory.cum_demand)> 1.00001).sum(dim=-1) # (T, aug*batch*pomo)
+                # out_node_penalty = out_node_penalty.min(dim=0)[0].reshape(aug_factor, -1, pomo_size)# best during improvement, shape: ( aug,batch,pomo)
+                # no_aug_out_nodes = out_node_penalty[0].min(dim=-1)[0] # shape: (batch,)
+                # aug_out_nodes = out_node_penalty.min(dim=0)[0].min(dim=-1)[0] # shape: (batch,)
+                # partial_sum_wrt_route_plan = torch.stack(memory.partial_sum_wrt_route_plan)
+                # out_penalty = ((partial_sum_wrt_route_plan - 1.00001) * (partial_sum_wrt_route_plan > 1.00001)).sum(dim=-1) # (T, aug*batch*pomo)
+                # out_penalty = out_penalty.min(dim=0)[0].reshape(aug_factor, -1, pomo_size)  # best during improvement, shape: (aug,batch,pomo)
+                # no_aug_out = out_penalty[0].min(dim=-1)[0] # shape: (batch,)
+                # aug_out = out_penalty.min(dim=0)[0].min(dim=-1)[0] # shape: (batch,)
+                out_node_penalties = out_node_penalties.view(aug_factor, -1, pomo_size)
+                no_aug_out_nodes = out_node_penalties[0].min(dim=-1)[0]
+                aug_out_nodes = out_node_penalties.min(dim=0)[0].min(dim=-1)[0]
+                out_penalties = out_penalties.view(aug_factor, -1, pomo_size)
+                no_aug_out = out_penalties[0].min(dim=-1)[0]
+                aug_out = out_penalties.min(dim=0)[0].min(dim=-1)[0]
+                self.val_metric_logger._improve_tensor_update("no_aug_out", no_aug_out)
+                self.val_metric_logger._improve_tensor_update("no_aug_out_nodes", no_aug_out_nodes)
+                self.val_metric_logger._improve_tensor_update("aug_out", aug_out)
+                self.val_metric_logger._improve_tensor_update("aug_out_nodes", aug_out_nodes)
+
+                # end update
+                # memory.clear_memory()
+
+                # torch.save(rewardd, "rewardd_car_pomo.pt")
+                # torch.save(fsbb, "fsb_car_pomo.pt")
+
+                return aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size//aug_factor, 1, -1), env.problem_size), is_improved
 
     def _val_improvement_with_eas(self, env, aug_factor, cons_reward, epsilon=None, batch_reward = None, weights = 0):
+        print(self.trainer_params["select_top_k_val"])
         assert self.trainer_params["select_top_k_val"] == 1, "Not implemented"
 
         # solution/rec shape: (batch, pomo, solution)
@@ -2087,7 +2208,7 @@ class Trainer:
         for iter in tqdm(range(iterations)):
 
             # preapare input for each iter (the best solution from previous improvement)
-            if "TSP" not in self.args.problem: solution = get_solution_with_dummy_depot(solution, env.problem_size)
+            if "TSP" not in self.args.problem and self.problem != "SOP": solution = get_solution_with_dummy_depot(solution, env.problem_size)
             batch_size, pomo_size, solution_size = solution.size() # batch_size = aug_factor * batch_size
             rec = sol2rec(solution).view(batch_size * pomo_size, -1)
             obj, context, out_penalty, out_node_penalty = env.get_costs(rec, get_context=True, out_reward=self.trainer_params["out_reward"], penalty_factor = self.lambda_, seperate_obj_penalty=self.trainer_params["seperate_obj_penalty"])
@@ -2249,121 +2370,122 @@ class Trainer:
                 remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size//aug_factor, 1, -1), env.problem_size), is_improved)
 
     def _val_reimprovement(self, env, aug_factor, old_aug_score_fsb, old_no_aug_score_fsb, old_aug_feasible, old_no_aug_feasible):
-        with torch.no_grad():
-            # solution/rec shape: (batch, pomo, solution)
-            solution = env.selected_node_list.clone()
-            if "TSP" not in self.args.problem: solution = get_solution_with_dummy_depot(solution, env.problem_size)
-            batch_size, pomo_size, solution_size = solution.size()  # batch_size = aug_factor * batch_size
-            rec = sol2rec(solution).view(batch_size * pomo_size, -1)
-            # preapare input
-            obj, context, out_penalty, out_node_penalty = env.get_costs(rec, get_context=True)  # obj only
-            obj = torch.cat((obj[:, None], obj[:, None], obj[:, None]), -1).clone()
-            # obj = obj.unsqueeze(-1).expand(-1, -1, 3)
-            total_history = self.trainer_params["total_history"]
-            if self.model_params["n2s_decoder"]:
-                context2 = torch.zeros(batch_size * pomo_size, 4, solution_size)
-                feasibility_history = torch.zeros(batch_size * pomo_size, total_history, solution_size)
-            else:
-                context2 = torch.zeros(batch_size * pomo_size, 9)
-                context2[:, -1] = (~env.infeasible).view(-1)  # current feasibility
-                feasibility_history = (~env.infeasible).view(-1, 1).expand(batch_size * pomo_size, total_history)
-            action = None
-            best_reward, best_index = (obj[:, 0].view(batch_size // aug_factor, aug_factor * pomo_size)).min(-1)
-            rec_best = rec.view(batch_size // aug_factor, aug_factor * pomo_size, -1)[
-                       torch.arange(batch_size // aug_factor), best_index, :].clone()
-            # print(f"!!!!!!!constructed best: {remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size)[:3]}")
-            is_improved = torch.zeros(batch_size // aug_factor).bool()
+        with torch.inference_mode():
+            with torch.amp.autocast("cuda") if "cuda" in str(self.device) else torch.inference_mode():
+                # solution/rec shape: (batch, pomo, solution)
+                solution = env.selected_node_list.clone()
+                if "TSP" not in self.args.problem and self.problem != "SOP": solution = get_solution_with_dummy_depot(solution, env.problem_size)
+                batch_size, pomo_size, solution_size = solution.size()  # batch_size = aug_factor * batch_size
+                rec = sol2rec(solution).view(batch_size * pomo_size, -1)
+                # preapare input
+                obj, context, out_penalty, out_node_penalty = env.get_costs(rec, get_context=True)  # obj only
+                obj = torch.cat((obj[:, None], obj[:, None], obj[:, None]), -1).clone()
+                # obj = obj.unsqueeze(-1).expand(-1, -1, 3)
+                total_history = self.trainer_params["total_history"]
+                if self.model_params["n2s_decoder"]:
+                    context2 = torch.zeros(batch_size * pomo_size, 4, solution_size)
+                    feasibility_history = torch.zeros(batch_size * pomo_size, total_history, solution_size)
+                else:
+                    context2 = torch.zeros(batch_size * pomo_size, 9)
+                    context2[:, -1] = (~env.infeasible).view(-1)  # current feasibility
+                    feasibility_history = (~env.infeasible).view(-1, 1).expand(batch_size * pomo_size, total_history)
+                action = None
+                best_reward, best_index = (obj[:, 0].view(batch_size // aug_factor, aug_factor * pomo_size)).min(-1)
+                rec_best = rec.view(batch_size // aug_factor, aug_factor * pomo_size, -1)[
+                           torch.arange(batch_size // aug_factor), best_index, :].clone()
+                # print(f"!!!!!!!constructed best: {remove_dummy_depot_from_solution(rec2sol(rec_best).view(batch_size, 1, -1), env.problem_size)[:3]}")
+                is_improved = torch.zeros(batch_size // aug_factor).bool()
 
-            # sample trajectory
-            t = 0
-            T = self.trainer_params["validation_improve_steps"]
-            use_LoRA = False
-            # memory = Memory()
-            # initial solution from construction
-            feasible_all = ((~env.infeasible).view(-1)).int()
-            min_scores = torch.full((batch_size * pomo_size,), float('inf'))
-            min_scores = torch.where(feasible_all.bool(), obj[:, 0], min_scores).clone()
-            out_node_penalties = torch.full((batch_size * pomo_size,), float('inf'))
-            # if self.args.problem == "CVRP":
-            #     out_node_penalty = (context[2] > 1.00001).sum(-1)
-            # elif self.args.problem == "TSPTW":
-            #     out_node_penalty = (torch.clamp_min(context[1] - context[-1], 0.0) > 1e-5).sum(-1) # (b*k)
-            out_node_penalties = torch.where(~(feasible_all.bool()), out_node_penalty, out_node_penalties).clone()
-            del out_node_penalty
-            out_penalties = torch.full((batch_size * pomo_size,), float('inf'))
-            # if self.args.problem == "CVRP":
-            #     out_penalty = ((context[3] - 1.00001) * (context[3] > 1.00001)).sum(dim=1)
-            # elif self.args.problem == "TSPTW":
-            #     out_penalty = torch.clamp_min(context[1] - context[-1], 0.0).sum(-1)
-            #     if self.trainer_params["penalty_normalize"]:
-            #         try:
-            #             out_penalty = out_penalty / context[-1][:, 0]
-            #         except:
-            #             out_penalty = out_penalty / context[-1][:, :1]
-            out_penalties = torch.where(~(feasible_all.bool()), out_penalty, out_penalties).clone()
-            del out_penalty
+                # sample trajectory
+                t = 0
+                T = self.trainer_params["validation_improve_steps"]
+                use_LoRA = False
+                # memory = Memory()
+                # initial solution from construction
+                feasible_all = ((~env.infeasible).view(-1)).int()
+                min_scores = torch.full((batch_size * pomo_size,), float('inf'))
+                min_scores = torch.where(feasible_all.bool(), obj[:, 0], min_scores).clone()
+                out_node_penalties = torch.full((batch_size * pomo_size,), float('inf'))
+                # if self.args.problem == "CVRP":
+                #     out_node_penalty = (context[2] > 1.00001).sum(-1)
+                # elif self.args.problem == "TSPTW":
+                #     out_node_penalty = (torch.clamp_min(context[1] - context[-1], 0.0) > 1e-5).sum(-1) # (b*k)
+                out_node_penalties = torch.where(~(feasible_all.bool()), out_node_penalty, out_node_penalties).clone()
+                del out_node_penalty
+                out_penalties = torch.full((batch_size * pomo_size,), float('inf'))
+                # if self.args.problem == "CVRP":
+                #     out_penalty = ((context[3] - 1.00001) * (context[3] > 1.00001)).sum(dim=1)
+                # elif self.args.problem == "TSPTW":
+                #     out_penalty = torch.clamp_min(context[1] - context[-1], 0.0).sum(-1)
+                #     if self.trainer_params["penalty_normalize"]:
+                #         try:
+                #             out_penalty = out_penalty / context[-1][:, 0]
+                #         except:
+                #             out_penalty = out_penalty / context[-1][:, :1]
+                out_penalties = torch.where(~(feasible_all.bool()), out_penalty, out_penalties).clone()
+                del out_penalty
 
-            while t < T:
-                # print(t)
+                while t < T:
+                    # print(t)
 
-                state = (env, rec, context, context2, action)
+                    state = (env, rec, context, context2, action)
 
-                if self.model_params["use_LoRA"] and t >= self.trainer_params["LoRA_begin_step"]: use_LoRA = True
-                action, _, improvement_method = self.model(state, solver="improvement", require_entropy=False, use_LoRA=use_LoRA)
+                    if self.model_params["use_LoRA"] and t >= self.trainer_params["LoRA_begin_step"]: use_LoRA = True
+                    action, _, improvement_method = self.model(state, solver="improvement", require_entropy=False, use_LoRA=use_LoRA)
 
-                # state transient
-                # rec, rewards, obj, feasibility_history, context, context2, info
-                rec, _, obj, feasibility_history, context, context2, _, out_penalty, out_node_penalty = env.improvement_step(
-                    rec, action, obj, feasibility_history, t,
-                    improvement_method=improvement_method, insert_before=self.trainer_params["insert_before"],
-                    n2s_decoder=self.model_params["n2s_decoder"])
-                # update best solution
-                criterion = obj.clone()
-                new_best, best_index = criterion[:, 0].view(batch_size // aug_factor, aug_factor * pomo_size).min(-1)
-                index = new_best < best_reward
-                best_reward[index] = new_best[index]  # update best reward
-                is_improved = (is_improved | index)
-                rec_best[index] = \
-                    rec.view(batch_size // aug_factor, aug_factor * pomo_size, -1)[
-                    torch.arange(batch_size // aug_factor),
-                    best_index, :][index].clone()  # update best solution
+                    # state transient
+                    # rec, rewards, obj, feasibility_history, context, context2, info
+                    rec, _, obj, feasibility_history, context, context2, _, out_penalty, out_node_penalty = env.improvement_step(
+                        rec, action, obj, feasibility_history, t,
+                        improvement_method=improvement_method, insert_before=self.trainer_params["insert_before"],
+                        n2s_decoder=self.model_params["n2s_decoder"])
+                    # update best solution
+                    criterion = obj.clone()
+                    new_best, best_index = criterion[:, 0].view(batch_size // aug_factor, aug_factor * pomo_size).min(-1)
+                    index = new_best < best_reward
+                    best_reward[index] = new_best[index]  # update best reward
+                    is_improved = (is_improved | index)
+                    rec_best[index] = \
+                        rec.view(batch_size // aug_factor, aug_factor * pomo_size, -1)[
+                        torch.arange(batch_size // aug_factor),
+                        best_index, :][index].clone()  # update best solution
 
-                feasible = out_penalty.sum(0) <= 0.0
-                feasible_all += feasible.int()
-                # Update scores with current step's results
-                min_scores = torch.where(feasible, torch.min(min_scores, obj[:, 0]), min_scores).clone()
+                    feasible = out_penalty.sum(0) <= 0.0
+                    feasible_all += feasible.int()
+                    # Update scores with current step's results
+                    min_scores = torch.where(feasible, torch.min(min_scores, obj[:, 0]), min_scores).clone()
 
-                out_node_penalties = torch.min(out_node_penalties, out_node_penalty.sum(0)).clone()
-                out_penalties = torch.min(out_penalties, out_penalty.sum(0)).clone()
+                    out_node_penalties = torch.min(out_node_penalties, out_node_penalty.sum(0)).clone()
+                    out_penalties = torch.min(out_penalties, out_penalty.sum(0)).clone()
 
-                # next
-                t = t + 1
+                    # next
+                    t = t + 1
 
-            # calculate infeasible outputs (BSF during improvement)
-            feasible = feasible_all > 0  # shape: (aug*batch*pomo)
-            aug_feasible = feasible.reshape(aug_factor, -1, pomo_size).any(dim=0).any(dim=-1)  # shape: (batch,)
-            no_aug_feasible = feasible.reshape(aug_factor, -1, pomo_size)[0].any(dim=-1)  # shape: (batch,)
-            no_aug_feasible = no_aug_feasible | old_no_aug_feasible
-            aug_feasible = aug_feasible | old_aug_feasible
-            self.val_metric_logger._reimprove_tensor_update("aug_feasible", aug_feasible)
-            self.val_metric_logger._reimprove_tensor_update("no_aug_feasible", no_aug_feasible)
-            sol_infeasible_rate = 1. - (feasible.sum() / (batch_size * pomo_size))  # batch_size = aug*batch
-            ins_infeasible_rate = 1. - aug_feasible.sum() / (batch_size // aug_factor)
-            self.val_metric_logger.reimprove_metrics["sol_infeasible_rate"].update(sol_infeasible_rate,
-                                                                                   batch_size * pomo_size)
-            self.val_metric_logger.reimprove_metrics["ins_infeasible_rate"].update(ins_infeasible_rate,
-                                                                                   batch_size // aug_factor)
+                # calculate infeasible outputs (BSF during improvement)
+                feasible = feasible_all > 0  # shape: (aug*batch*pomo)
+                aug_feasible = feasible.reshape(aug_factor, -1, pomo_size).any(dim=0).any(dim=-1)  # shape: (batch,)
+                no_aug_feasible = feasible.reshape(aug_factor, -1, pomo_size)[0].any(dim=-1)  # shape: (batch,)
+                no_aug_feasible = no_aug_feasible | old_no_aug_feasible
+                aug_feasible = aug_feasible | old_aug_feasible
+                self.val_metric_logger._reimprove_tensor_update("aug_feasible", aug_feasible)
+                self.val_metric_logger._reimprove_tensor_update("no_aug_feasible", no_aug_feasible)
+                sol_infeasible_rate = 1. - (feasible.sum() / (batch_size * pomo_size))  # batch_size = aug*batch
+                ins_infeasible_rate = 1. - aug_feasible.sum() / (batch_size // aug_factor)
+                self.val_metric_logger.reimprove_metrics["sol_infeasible_rate"].update(sol_infeasible_rate,
+                                                                                       batch_size * pomo_size)
+                self.val_metric_logger.reimprove_metrics["ins_infeasible_rate"].update(ins_infeasible_rate,
+                                                                                       batch_size // aug_factor)
 
-            min_scores = min_scores.view(aug_factor, -1, pomo_size)
-            aug_score_fsb = min_scores.min(dim=-1)[0].min(dim=0)[0]
-            no_aug_score_fsb = min_scores[0].min(dim=-1)[0]
-            no_aug_score_fsb = torch.min(no_aug_score_fsb, old_no_aug_score_fsb)
-            aug_score_fsb = torch.min(aug_score_fsb, old_aug_score_fsb)
-            self.val_metric_logger._reimprove_tensor_update("aug_score", aug_score_fsb)
-            self.val_metric_logger._reimprove_tensor_update("no_aug_score", no_aug_score_fsb)
+                min_scores = min_scores.view(aug_factor, -1, pomo_size)
+                aug_score_fsb = min_scores.min(dim=-1)[0].min(dim=0)[0]
+                no_aug_score_fsb = min_scores[0].min(dim=-1)[0]
+                no_aug_score_fsb = torch.min(no_aug_score_fsb, old_no_aug_score_fsb)
+                aug_score_fsb = torch.min(aug_score_fsb, old_aug_score_fsb)
+                self.val_metric_logger._reimprove_tensor_update("aug_score", aug_score_fsb)
+                self.val_metric_logger._reimprove_tensor_update("no_aug_score", no_aug_score_fsb)
 
-            return aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, remove_dummy_depot_from_solution(
-                rec2sol(rec_best).view(batch_size // aug_factor, 1, -1), env.problem_size), is_improved
+                return aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, remove_dummy_depot_from_solution(
+                    rec2sol(rec_best).view(batch_size // aug_factor, 1, -1), env.problem_size), is_improved
 
     def _get_construction_output(self, infeasible, reward, prob_list=None, improve_reward=None, select_idx=None, probs_return_list=None, epsilon=None):
         # Input.shape
@@ -2817,6 +2939,8 @@ class Trainer:
                 self.val_metric_logger.refinement_feasible_bsf_history = best_feasible.unsqueeze(-1)
                 self.val_metric_logger.refinement_reward_bsf_history = best_reward.unsqueeze(-1)
                 # self.val_metric_logger.refinement_solution_history = solution_[0].unsqueeze(1) # batch, 0~T, solution
+                self.val_metric_logger.penalty_history = penalty.unsqueeze(-1)
+                self.val_metric_logger.travel_distance_history = dist_.unsqueeze(-1)
         else:
             max_pomo_reward, _ = aug_reward.max(dim=2)
             no_aug_score = -max_pomo_reward[0, :].float()

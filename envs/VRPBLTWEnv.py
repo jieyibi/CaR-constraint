@@ -509,6 +509,8 @@ class VRPBLTWEnv:
             demand_scaler = 70
         elif problem_size == 10:
             demand_scaler = 20
+        elif problem_size == 500:
+            demand_scaler = 100
         else:
             raise NotImplementedError
 

@@ -17,7 +17,8 @@ EPSILON = {
     20: 0.74,
     50: 1.85,
     100: 3.7,
-    200: 7.4
+    200: 7.4,
+    500: 14.85
 }
 
 EPSILON_hardcoded = 1.85
@@ -858,7 +859,7 @@ class TSPTWEnv:
         else:
             return cost, out_penalty.unsqueeze(0), out_node_penalty.unsqueeze(0)
 
-    def get_dynamic_feature(self, context, with_infsb_feature, tw_normalize=False):
+    def get_dynamic_feature(self, context, with_infsb_feature, tw_normalize=False, feature=None):
         visited_time, arrival_time, last_arrival_time, tw_start, tw_end = context
         if tw_normalize:
             tw_end_max = tw_end[:, :1].clone()

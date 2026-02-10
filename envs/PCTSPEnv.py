@@ -1,10 +1,11 @@
 from dataclasses import dataclass
+from turtle import distance
 import torch
 import os, pickle
 import numpy as np
 from utils import *
 
-__all__ = ['SOPEnv']
+__all__ = ['PCTSPEnv']
 EPSILON_hardcoded = 0.05  # maximal 5% of the precedence constraint can be violated
 
 
@@ -12,8 +13,12 @@ EPSILON_hardcoded = 0.05  # maximal 5% of the precedence constraint can be viola
 class Reset_State:
     node_xy: torch.Tensor = None
     # shape: (batch, problem, 2)
-    precedence_matrix: torch.Tensor = None  # precedence[b, i, j] = 1 if i precedes j
+    precedence_matrix: torch.Tensor = None  # precedence[b, i, j] = -1 if i precedes j and i->j is infeasible
     # shape: (batch, problem, problem)
+    distance_matrix: torch.Tensor = None  # distance = Euclidean distance + precedence_matrix (Edge weight in LKH)
+    # shape: (batch, problem, problem)
+    color_matrix: torch.Tensor = None  # color[b, i, c] = 1 if node i belongs to color c (color = salesman)
+    # shape: (batch, problem, color)
 
 
 @dataclass
@@ -38,18 +43,20 @@ class Step_State:
     # shape: (batch, pomo, 2)
 
 
-class SOPEnv:
+class PCTSPEnv:
     def __init__(self, **env_params):
 
         # Const @INIT
         ####################################
-        self.problem = "SOP"
+        self.problem = "PCTSP"
         self.env_params = env_params
         self.problem_size = env_params['problem_size']
+        self.color_size = env_params['color_size']  # salesmen number
         self.pomo_size = env_params['pomo_size']
-        self.precedence_ratio = env_params['precedence_ratio']
-        self.geometric_conflict_ratio = env_params['geometric_conflict_ratio']
         self.loc_scaler = env_params['loc_scaler'] if 'loc_scaler' in env_params.keys() else None
+        # hardness control parameters
+        self.precedence_ratio = env_params['precedence_ratio']  # ratio of precedence constraints
+        self.color_ratio = env_params['color_ratio']  # average ratio of salesmen that can visit each node
 
         self.epsilon = EPSILON_hardcoded
         self.k_max = self.env_params['k_max'] if 'k_max' in env_params.keys() else None
@@ -57,7 +64,7 @@ class SOPEnv:
             self.pomo_size = env_params['pomo_size'] if env_params['pomo_start'] else env_params['train_z_sample_size']
 
         self.device = torch.device('cuda', torch.cuda.current_device()) if 'device' not in env_params.keys() else \
-        env_params['device']
+            env_params['device']
 
         # Const @Load_Problem
         ####################################
@@ -67,11 +74,12 @@ class SOPEnv:
         self.START_NODE = None
         # IDX.shape: (batch, pomo)
         self.node_xy = None
-        self.lib_node_xy = None
-        # if self.env_params['original_lib_xy'] is not None:
-        #     self.lib_node_xy  = self.env_params['original_lib_xy']
         # shape: (batch, problem, 2)
         self.precedence_matrix = None
+        # shape: (batch, problem, problem)
+        self.color_matrix = None
+        # shape: (batch, problem, color)
+        self.distance_matrix = None
         # shape: (batch, problem, problem)
 
         # Dynamic-1
@@ -82,11 +90,15 @@ class SOPEnv:
         self.selected_node_list = None
         self.infeasibility_list = None
         self.wrong_precedence_list = None  # shape: (batch, pomo, 0~)
+        self.wrong_color_list = None
+        self.current_salesman = None  # shape: (batch, pomo) - current salesman ID for each pomo
+        self.salesman_node_list = None  # shape: (batch, pomo, color_size) - list of nodes for each salesman
 
         # Dynamic-2
         ####################################
         self.visited_ninf_flag = None
         self.wrong_precedence_ninf_flag = None
+        self.wrong_color_ninf_flag = None
         self.ninf_mask = None
         # shape: (batch, pomo, problem)
         self.finished = None
@@ -105,26 +117,30 @@ class SOPEnv:
     def load_problems(self, batch_size, rollout_size, problems=None, aug_factor=1, normalize=False):
         self.pomo_size = rollout_size
         if problems is not None:
-            node_xy, precedence_matrix = problems
+            node_xy, precedence_matrix, color_matrix, distance_matrix = problems
         else:
-            node_xy, precedence_matrix = self.get_random_problems(batch_size, self.problem_size, normalized=normalize)
+            node_xy, precedence_matrix, color_matrix, distance_matrix = self.get_random_problems(batch_size,
+                                                                                                 self.problem_size,
+                                                                                                 normalized=normalize)
         self.batch_size = node_xy.size(0)
 
         if aug_factor > 1:
             if aug_factor == 8:
                 self.batch_size = self.batch_size * 8
                 node_xy = self.augment_xy_data_by_8_fold(node_xy)
-                node_demand = node_demand.repeat(8, 1)
-                node_draft_limit = node_draft_limit.repeat(8, 1)
+                precedence_matrix = precedence_matrix.repeat(8, 1, 1)
+                color_matrix = color_matrix.repeat(8, 1, 1)
+                distance_matrix = distance_matrix.repeat(8, 1, 1)
             else:
                 raise NotImplementedError
         # print(node_xy.size())
         self.node_xy = node_xy
-        if self.lib_node_xy is not None:
-            self.lib_node_xy = self.lib_node_xy.repeat(8, 1, 1)
-            # shape: (8*batch, N, 2)
         # shape: (batch, problem, 2)
         self.precedence_matrix = precedence_matrix
+        # shape: (batch, problem, problem)
+        self.color_matrix = color_matrix
+        # shape: (batch, problem, color)
+        self.distance_matrix = distance_matrix
         # shape: (batch, problem, problem)
 
         self.BATCH_IDX = torch.arange(self.batch_size)[:, None].expand(self.batch_size, self.pomo_size).to(self.device)
@@ -132,6 +148,8 @@ class SOPEnv:
 
         self.reset_state.node_xy = node_xy
         self.reset_state.precedence_matrix = precedence_matrix
+        self.reset_state.color_matrix = color_matrix
+        self.reset_state.distance_matrix = distance_matrix
 
         self.step_state.BATCH_IDX = self.BATCH_IDX
         self.step_state.POMO_IDX = self.POMO_IDX
@@ -145,12 +163,23 @@ class SOPEnv:
         # shape: (batch, pomo)
         self.selected_node_list = torch.zeros((self.batch_size, self.pomo_size, 0), dtype=torch.long).to(self.device)
         self.wrong_precedence_list = torch.zeros((self.batch_size, self.pomo_size, 0)).to(self.device)
+        self.wrong_color_list = torch.zeros((self.batch_size, self.pomo_size, 0), dtype=torch.bool).to(self.device)
         self.infeasibility_list = torch.zeros((self.batch_size, self.pomo_size, 0), dtype=torch.bool).to(
             self.device)  # True for causing infeasibility
         # shape: (batch, pomo, 0~)
 
+        # Initialize current_salesman: each pomo starts with salesman 0 (first salesman)
+        # Note: salesman IDs are 0-indexed (0 to color_size-1)
+        self.current_salesman = torch.zeros(size=(self.batch_size, self.pomo_size), dtype=torch.long).to(self.device)
+        # shape: (batch, pomo)
+        # Initialize salesman_node_list: track which nodes belong to which salesman
+        self.salesman_node_list = [[] for _ in range(self.batch_size * self.pomo_size)]
+        # Will be converted to tensor when needed
+
         self.visited_ninf_flag = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size)).to(self.device)
         self.wrong_precedence_ninf_flag = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size)).to(
+            self.device)
+        self.wrong_color_ninf_flag = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size)).to(
             self.device)
         # shape: (batch, pomo, problem)
         self.ninf_mask = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size)).to(self.device)
@@ -180,6 +209,103 @@ class SOPEnv:
         done = False
         return self.step_state, reward, done
 
+    def _compute_precedence_mask(self):
+        """
+        Compute mask for precedence constraints.
+        If node j has been visited and precedence_matrix[i, j] = True (i must precede j),
+        then node i cannot be visited anymore (mask it).
+
+        Returns:
+            precedence_mask: (batch, pomo, problem) - True means node is masked due to precedence violation
+        """
+        # visited_ninf_flag: (batch, pomo, problem)
+        # visited[i] = -inf means node i has been visited
+        visited = (self.visited_ninf_flag == float('-inf'))  # (batch, pomo, problem)
+
+        # precedence_matrix: (batch, problem, problem)
+        # precedence_matrix[b, i, j] = True means i must precede j
+
+        # For each batch and pomo, check if any visited node j has precedence constraint i->j
+        # where i has not been visited yet
+        # We need to mask node i if:
+        #   - i has not been visited
+        #   - There exists j such that j has been visited AND precedence_matrix[i, j] = True
+
+        # Expand visited to (batch, pomo, problem, 1) for broadcasting
+        visited_expanded = visited.unsqueeze(-1)  # (batch, pomo, problem, 1)
+
+        # Expand precedence_matrix to (batch, 1, problem, problem)
+        precedence_expanded = self.precedence_matrix.unsqueeze(1)  # (batch, 1, problem, problem)
+
+        # Check for each node i: does there exist j such that precedence[i, j] = True and visited[j] = True?
+        # precedence_expanded: (batch, 1, problem, problem)
+        # visited_expanded: (batch, pomo, problem, 1)
+        # We want: for each (b, p, i), check if any j exists such that precedence[b, i, j] = True and visited[b, p, j] = True
+        # This is: (precedence_expanded & visited_expanded).any(dim=-1)
+        # But we need to align dimensions: precedence is (batch, 1, problem, problem), visited is (batch, pomo, problem, 1)
+        # We need: (batch, pomo, problem, problem) where [b, p, i, j] = precedence[b, i, j] & visited[b, p, j]
+
+        # Align dimensions: expand precedence to (batch, pomo, problem, problem)
+        precedence_aligned = precedence_expanded.expand(-1, self.pomo_size, -1, -1)  # (batch, pomo, problem, problem)
+        # visited_expanded: (batch, pomo, problem, 1) -> expand to (batch, pomo, 1, problem) then transpose
+        visited_for_precedence = visited.unsqueeze(2)  # (batch, pomo, 1, problem)
+        visited_for_precedence = visited_for_precedence.expand(-1, -1, self.problem_size,
+                                                               -1)  # (batch, pomo, problem, problem)
+
+        # Check: precedence[b, p, i, j] = True AND visited[b, p, j] = True
+        precedence_violation = precedence_aligned & visited_for_precedence  # (batch, pomo, problem, problem)
+
+        # For each node i, if any j violates precedence, mask i
+        precedence_mask = precedence_violation.any(dim=-1)  # (batch, pomo, problem)
+
+        # Only mask nodes that haven't been visited yet
+        precedence_mask = precedence_mask & (~visited)  # (batch, pomo, problem)
+
+        return precedence_mask
+
+    def _compute_color_mask(self):
+        """
+        Compute mask for color constraints.
+        Mask nodes that cannot be visited by current_salesman.
+
+        Returns:
+            color_mask: (batch, pomo, problem) - True means node is masked due to color constraint
+        """
+        # current_salesman: (batch, pomo)
+        # color_matrix: (batch, problem, color_size)
+
+        # Expand current_salesman to (batch, pomo, 1)
+        current_salesman_expanded = self.current_salesman.unsqueeze(-1)  # (batch, pomo, 1)
+
+        # Get color constraints for all nodes: (batch, problem, color_size)
+        # For each (batch, pomo), get allowed colors for all nodes
+        # We need to gather: color_matrix[batch, :, current_salesman[batch, pomo]]
+        # This is tricky because we need to index color_matrix with current_salesman
+
+        # Method: For each batch and pomo, check if node i can be visited by current_salesman[b, p]
+        # color_matrix: (batch, problem, color_size)
+        # current_salesman: (batch, pomo)
+
+        # Create indices: for each (b, p), we want color_matrix[b, :, current_salesman[b, p]]
+        batch_idx = torch.arange(self.batch_size, device=self.device)[:, None, None].expand(-1, self.pomo_size,
+                                                                                            self.problem_size)
+        node_idx = torch.arange(self.problem_size, device=self.device)[None, None, :].expand(self.batch_size,
+                                                                                             self.pomo_size, -1)
+        salesman_idx = current_salesman_expanded.expand(-1, -1, self.problem_size)  # (batch, pomo, problem)
+
+        # Gather: color_matrix[batch_idx, node_idx, salesman_idx]
+        # This gives us: (batch, pomo, problem) - True if node can be visited by current_salesman
+        can_visit = self.color_matrix[batch_idx, node_idx, salesman_idx]  # (batch, pomo, problem)
+
+        # Mask nodes that cannot be visited
+        color_mask = ~can_visit  # (batch, pomo, problem)
+
+        # Don't mask already visited nodes (they're already masked by visited_ninf_flag)
+        visited = (self.visited_ninf_flag == float('-inf'))  # (batch, pomo, problem)
+        color_mask = color_mask & (~visited)  # (batch, pomo, problem)
+
+        return color_mask
+
     def step(self, selected, visit_mask_only=True, out_reward=False, generate_PI_mask=False,
              use_predicted_PI_mask=False, pip_step=1,
              soft_constrained=False, backhaul_mask=None, penalty_normalize=False):
@@ -195,14 +321,6 @@ class SOPEnv:
 
         # Dynamic-2
         ####################################
-        demand_list = self.node_demand[:, None, :].expand(self.batch_size, self.pomo_size, -1)
-        # shape: (batch, pomo, problem)
-        gathering_index = selected[:, :, None]
-        # shape: (batch, pomo, 1)
-        selected_demand = demand_list.gather(dim=2, index=gathering_index).squeeze(dim=2)
-        # shape: (batch, pomo)
-        self.load += selected_demand
-
         current_coord = self.node_xy[torch.arange(self.batch_size)[:, None], selected]
         # shape: (batch, pomo, 2)
         new_length = (current_coord - self.current_coord).norm(p=2, dim=-1)
@@ -216,41 +334,82 @@ class SOPEnv:
         self.visited_ninf_flag[self.BATCH_IDX, self.POMO_IDX, selected] = float('-inf')
         # shape: (batch, pomo, problem)
 
-        # draft limit constraint
-        round_error_epsilon = 0.00001
-        dl_list = self.node_draft_limit[:, None, :].expand(self.batch_size, self.pomo_size, -1)
-        # shape: (batch, pomo, problem)
+        # PCTSP-specific constraints: precedence and color
+        # Compute precedence mask: mask nodes that violate precedence constraints
+        precedence_mask = self._compute_precedence_mask()  # (batch, pomo, problem)
+        self.wrong_precedence_ninf_flag[precedence_mask] = float('-inf')
 
-        # simulate the right infsb mask and see ATTENTION!
-        if generate_PI_mask and self.selected_count < self.problem_size - 1:
-            self._calculate_PIP_mask(pip_step)
+        # Compute color mask: mask nodes that cannot be visited by current_salesman
+        color_mask = self._compute_color_mask()  # (batch, pomo, problem)
+        self.wrong_color_ninf_flag[color_mask] = float('-inf')
 
-        # (current load + demand of next node > draft limit of next node) means infeasible
-        out_of_dl = self.load[:, :, None] + demand_list > dl_list + round_error_epsilon
-        # shape: (batch, pomo, problem)
-        self.out_of_dl_ninf_flag[out_of_dl] = float('-inf')
-        # shape: (batch, pomo, problem)
-        # value that exceeds draft limit of the selected node = current load - node_draft_limit
-        total_out_of_dl = self.load - self.node_draft_limit[torch.arange(self.batch_size)[:, None], selected]
-        # negative value means current load < node_draft_limit, turn it into 0
-        total_out_of_dl = torch.where(total_out_of_dl < 0, torch.zeros_like(total_out_of_dl), total_out_of_dl)
-        # shape: (batch, pomo)
-        self.out_of_draft_limit_list = torch.cat((self.out_of_draft_limit_list, total_out_of_dl[:, :, None]), dim=2)
-
+        # Combine all masks: visited, precedence, and color constraints
         self.ninf_mask = self.visited_ninf_flag.clone()
-        if not visit_mask_only or not soft_constrained:
-            self.ninf_mask[out_of_dl] = float('-inf')
-        if generate_PI_mask and self.selected_count < self.problem_size - 1 and (not use_predicted_PI_mask):
-            self.ninf_mask = torch.where(self.simulated_ninf_flag == float('-inf'), float('-inf'), self.ninf_mask)
-            all_infsb = ((self.ninf_mask == float('-inf')).all(dim=-1)).unsqueeze(-1).expand(-1, -1, self.problem_size)
-            self.ninf_mask = torch.where(all_infsb, self.visited_ninf_flag, self.ninf_mask)
+        # Apply precedence mask
+        self.ninf_mask[self.wrong_precedence_ninf_flag == float('-inf')] = float('-inf')
+        # Apply color mask
+        self.ninf_mask[self.wrong_color_ninf_flag == float('-inf')] = float('-inf')
 
-        # visited == 0 means not visited
-        # out_of_dl_ninf_flag == -inf means already can not be visited bacause current_load + node_demand > node_draft_limit
-        newly_infeasible = (
+        # Optional: draft limit constraint (if exists)
+        if hasattr(self, 'node_draft_limit') and self.node_draft_limit is not None:
+            round_error_epsilon = 0.00001
+            dl_list = self.node_draft_limit[:, None, :].expand(self.batch_size, self.pomo_size, -1)
+            # shape: (batch, pomo, problem)
+
+            # simulate the right infsb mask and see ATTENTION!
+            if generate_PI_mask and self.selected_count < self.problem_size - 1:
+                self._calculate_PIP_mask(pip_step)
+
+            # (current load + demand of next node > draft limit of next node) means infeasible
+            if hasattr(self, 'load') and hasattr(self, 'node_demand'):
+                demand_list = self.node_demand[:, None, :].expand(self.batch_size, self.pomo_size, -1)
+                out_of_dl = self.load[:, :, None] + demand_list > dl_list + round_error_epsilon
+                # shape: (batch, pomo, problem)
+                if hasattr(self, 'out_of_dl_ninf_flag'):
+                    self.out_of_dl_ninf_flag[out_of_dl] = float('-inf')
+                # shape: (batch, pomo, problem)
+                # value that exceeds draft limit of the selected node = current load - node_draft_limit
+                total_out_of_dl = self.load - self.node_draft_limit[torch.arange(self.batch_size)[:, None], selected]
+                # negative value means current load < node_draft_limit, turn it into 0
+                total_out_of_dl = torch.where(total_out_of_dl < 0, torch.zeros_like(total_out_of_dl), total_out_of_dl)
+                # shape: (batch, pomo)
+                if hasattr(self, 'out_of_draft_limit_list'):
+                    self.out_of_draft_limit_list = torch.cat(
+                        (self.out_of_draft_limit_list, total_out_of_dl[:, :, None]), dim=2)
+
+                if not visit_mask_only or not soft_constrained:
+                    self.ninf_mask[out_of_dl] = float('-inf')
+
+        if generate_PI_mask and self.selected_count < self.problem_size - 1 and (not use_predicted_PI_mask):
+            if hasattr(self, 'simulated_ninf_flag'):
+                self.ninf_mask = torch.where(self.simulated_ninf_flag == float('-inf'), float('-inf'), self.ninf_mask)
+                all_infsb = ((self.ninf_mask == float('-inf')).all(dim=-1)).unsqueeze(-1).expand(-1, -1,
+                                                                                                 self.problem_size)
+                self.ninf_mask = torch.where(all_infsb, self.visited_ninf_flag, self.ninf_mask)
+
+        # Check for infeasibility:
+        # 1. Precedence violation: if a node that must precede an already-visited node is still unvisited
+        # 2. Color violation: if a node cannot be visited by any salesman
+        # 3. Draft limit violation (if applicable)
+        precedence_violation = (self.wrong_precedence_ninf_flag == float('-inf')).any(dim=2)  # (batch, pomo)
+        color_violation = (self.wrong_color_ninf_flag == float('-inf')).any(dim=2)  # (batch, pomo)
+
+        # Check if all remaining unvisited nodes are masked (infeasible)
+        unvisited = (self.visited_ninf_flag == 0)  # (batch, pomo, problem)
+        all_unvisited_masked = ((unvisited & (self.ninf_mask == float('-inf'))).sum(dim=2) == unvisited.sum(dim=2)) & (
+                    unvisited.sum(dim=2) > 0)
+        # (batch, pomo) - True if all unvisited nodes are masked and there are unvisited nodes
+
+        newly_infeasible = precedence_violation | color_violation | all_unvisited_masked
+
+        # Also check draft limit if applicable
+        if hasattr(self, 'out_of_dl_ninf_flag'):
+            draft_limit_violation = (
                     ((self.visited_ninf_flag == 0).int() + (self.out_of_dl_ninf_flag == float('-inf')).int()) == 2).any(
-            dim=2)
-        self.infeasible = self.infeasible + newly_infeasible
+                dim=2)
+            newly_infeasible = newly_infeasible | draft_limit_violation
+
+        self.infeasible = self.infeasible | newly_infeasible
         # once the infeasibility occurs, no matter which node is selected next, the route has already become infeasible
         self.infeasibility_list = torch.cat((self.infeasibility_list, self.infeasible[:, :, None]), dim=2)
         infeasible = 0.
@@ -327,7 +486,7 @@ class SOPEnv:
             os.makedirs(filedir)
         with open(path, 'wb') as f:
             pickle.dump(list(zip(*dataset)), f, pickle.HIGHEST_PROTOCOL)
-        print("Save SOP dataset to {}".format(path))
+        print("Save PCTSP dataset to {}".format(path))
 
     def load_dataset(self, path, offset=0, num_samples=1000, disable_print=True):
         assert os.path.splitext(path)[1] == ".pkl", "Unsupported file type (.pkl needed)."
@@ -335,17 +494,232 @@ class SOPEnv:
             data = pickle.load(f)[offset: offset + num_samples]
             if not disable_print:
                 print(">> Load {} data ({}) from {}".format(len(data), type(data), path))
-        node_xy, precedence_matrix = [i[0] for i in data], [i[1] for i in data]
-        node_xy, precedence_matrix = torch.Tensor(node_xy), torch.Tensor(precedence_matrix)
-        data = (node_xy, precedence_matrix)
+        node_xy, precedence_matrix, color_matrix, distance_matrix = [i[0] for i in data], [i[1] for i in data], [i[2]
+                                                                                                                 for i
+                                                                                                                 in
+                                                                                                                 data], [
+            i[3] for i in data]
+        node_xy, precedence_matrix, color_matrix, distance_matrix = torch.Tensor(node_xy), torch.Tensor(
+            precedence_matrix), torch.Tensor(color_matrix), torch.Tensor(distance_matrix)
+        data = (node_xy, precedence_matrix, color_matrix, distance_matrix)
         return data
 
     def get_random_problems(self, batch_size, problem_size, normalized=True):
+
         precedence_ratio = self.precedence_ratio
-        geometric_conflict_ratio = self.geometric_conflict_ratio
+        color_ratio = self.color_ratio
+        color_size = self.color_size
+
+        # 1. Generate node coordinates (depot at index 0, customers at 1:problem_size)
         node_xy = torch.rand(size=(batch_size, problem_size, 2))  # (batch, problem, 2)
 
-        return node_xy, precedence_matrix
+        # 2. Compute Euclidean distance matrix
+        # node_xy: (batch, problem, 2)
+        # Expand to compute pairwise distances
+        node_xy_i = node_xy.unsqueeze(2)  # (batch, problem, 1, 2)
+        node_xy_j = node_xy.unsqueeze(1)  # (batch, 1, problem, 2)
+        distance_matrix = torch.sqrt(((node_xy_i - node_xy_j) ** 2).sum(dim=-1) + 1e-8)  # (batch, problem, problem)
+
+        # 3. Generate precedence constraints (guaranteed feasible by construction)
+        # if distance[i][j] == -1, it means:
+        #   - i cannot directly go to j (infeasible edge)
+        #   - i must precede j (precedence constraint)
+        precedence_matrix = torch.zeros(size=(batch_size, problem_size, problem_size), dtype=torch.bool)
+
+        # Strategy: Generate random topological orders for all batches, then add precedence constraints
+        # This guarantees acyclicity and feasibility
+
+        # Generate random permutations (topological orders) for all batches
+        # Shape: (batch_size, problem_size)
+        # Use argsort on random values to generate random permutations
+        random_vals = torch.rand(batch_size, problem_size)
+        topo_orders = torch.argsort(random_vals, dim=1)
+
+        # Sample precedence constraints based on topological order
+        # Only allow precedence from earlier nodes to later nodes in topo_order
+        # Since we exclude adjacent pairs (pos_j - pos_i > 1), the maximum number of valid pairs is:
+        # For n nodes: (n-2) + (n-3) + ... + 1 = (n-2)(n-1)/2
+        max_valid_pairs = (problem_size - 2) * (problem_size - 1) // 2 if problem_size > 2 else 0
+        num_constraints = int(precedence_ratio * max_valid_pairs)
+        if num_constraints > 0:
+            # Create position mapping for all batches
+            # pos[b, i] = position of node i in topo_order for batch b
+            # Shape: (batch_size, problem_size)
+            pos = torch.zeros(batch_size, problem_size, dtype=torch.long)
+            batch_indices = torch.arange(batch_size).unsqueeze(1).expand(-1, problem_size)
+            pos[batch_indices, topo_orders] = torch.arange(problem_size).unsqueeze(0).expand(batch_size, -1)
+
+            # Generate all pairs (i, j) using meshgrid
+            # Shape: (problem_size, problem_size)
+            i_indices, j_indices = torch.meshgrid(
+                torch.arange(problem_size, dtype=torch.long),
+                torch.arange(problem_size, dtype=torch.long),
+                indexing='ij'
+            )
+
+            # Expand for all batches
+            # Shape: (batch_size, problem_size, problem_size)
+            pos_i = pos[:, i_indices]  # pos[b, i] for all i
+            pos_j = pos[:, j_indices]  # pos[b, j] for all j
+
+            # Filter: only keep pairs where i comes before j in topo_order
+            # This ensures: if distance[i][j] == -1, then:
+            #   1. i must precede j (precedence constraint)
+            #   2. i cannot directly go to j (infeasible edge, Distance_SOP returns M)
+            # Additionally, we exclude adjacent pairs in topo_order (pos_j - pos_i > 1)
+            # to avoid selecting pairs that are directly adjacent in the topological order
+            # i.e., pos[b, i] < pos[b, j] and i != j and (pos_j - pos_i) > 1
+            # Shape: (batch_size, problem_size, problem_size)
+            valid_mask = (pos_i < pos_j) & (i_indices.unsqueeze(0) != j_indices.unsqueeze(0)) & ((pos_j - pos_i) > 1)
+
+            # Generate random selection mask for all batches
+            # Create a random probability matrix and select top-k for each batch
+            # Shape: (batch_size, problem_size, problem_size)
+            random_probs = torch.rand(batch_size, problem_size, problem_size, device=valid_mask.device)
+            # Set invalid pairs to -inf so they won't be selected
+            random_probs = torch.where(valid_mask, random_probs,
+                                       torch.tensor(float('-inf'), device=random_probs.device))
+
+            # Select top num_constraints for each batch
+            # Flatten last two dimensions for easier topk selection
+            random_probs_flat = random_probs.view(batch_size, -1)  # (batch_size, problem_size^2)
+            _, topk_indices = torch.topk(random_probs_flat, k=num_constraints, dim=1)
+
+            # Convert flat indices back to (i, j) pairs
+            batch_idx = torch.arange(batch_size, device=topk_indices.device).unsqueeze(1).expand(-1,
+                                                                                                 topk_indices.size(1))
+            flat_indices = topk_indices.flatten()
+            batch_flat = batch_idx.flatten()
+
+            # Get (i, j) coordinates from flat indices
+            # flat_index = i * problem_size + j
+            selected_i_flat = (flat_indices // problem_size).long()
+            selected_j_flat = (flat_indices % problem_size).long()
+
+            # Filter out invalid selections (where valid_mask is False)
+            valid_selections = valid_mask[batch_flat, selected_i_flat, selected_j_flat]
+            selected_i = selected_i_flat[valid_selections]
+            selected_j = selected_j_flat[valid_selections]
+            selected_batch = batch_flat[valid_selections]
+
+            # Set precedence constraints (fully vectorized)
+            if len(selected_i) > 0:
+                precedence_matrix[selected_batch, selected_i, selected_j] = True
+                # Set distance to -1 (LKH convention)
+                distance_matrix[selected_batch, selected_i, selected_j] = -1.0
+
+            # Compute transitive closure for all batches (vectorized)
+            prec = precedence_matrix.float()
+            for k in range(problem_size):
+                # Compute transitive closure: prec | (prec[:, :, k] & prec[:, k, :])
+                # Use maximum instead of | for float tensors
+                prec = torch.maximum(prec, (prec[:, :, k:k + 1] * prec[:, k:k + 1, :]))
+            precedence_matrix = (prec > 0).bool()
+
+        # 4. Generate color constraints (GCTSP_SET_SECTION format) - fully vectorized
+        # color_matrix[b, i, c] = 1 means node i can be visited by salesman/color c
+        color_matrix = torch.zeros(size=(batch_size, problem_size, color_size), dtype=torch.bool)
+
+        # Each node must have at least one color
+        # Sample colors based on color_ratio
+        num_colors = max(1, int(color_ratio * color_size))
+
+        if num_colors < color_size:
+            # Generate random values for all (batch, node, color) combinations
+            # Shape: (batch_size, problem_size, color_size)
+            random_color_vals = torch.rand(batch_size, problem_size, color_size)
+            # Use argsort to get random permutations for each node
+            color_permutations = torch.argsort(random_color_vals, dim=2)
+            # Select top num_colors for each node
+            selected_color_indices = color_permutations[:, :, :num_colors]
+
+            # Set selected colors to True using advanced indexing
+            batch_idx = torch.arange(batch_size, device=selected_color_indices.device).unsqueeze(1).unsqueeze(2).expand(
+                -1, problem_size, num_colors)
+            node_idx = torch.arange(problem_size, device=selected_color_indices.device).unsqueeze(0).unsqueeze(
+                2).expand(batch_size, -1, num_colors)
+            color_matrix[batch_idx, node_idx, selected_color_indices] = True
+        else:
+            # All colors allowed for all nodes
+            color_matrix[:, :, :] = True
+
+        # # 5. Verify feasibility for each batch (sanity check)
+        # # Since we generate constraints based on topological order, they should always be feasible
+        # # But we verify to catch any bugs
+        # for b in range(batch_size):
+        #     feasible = self._verify_feasibility(
+        #         precedence_matrix[b],
+        #         color_matrix[b],
+        #         problem_size,
+        #         color_size
+        #     )
+        #     if not feasible:
+        #         # This should never happen with the new generation method
+        #         # But if it does, we raise an error to catch bugs
+        #         raise RuntimeError(f"Generated infeasible instance at batch {b}. "
+        #                          f"This indicates a bug in constraint generation.")
+
+        return node_xy, precedence_matrix, color_matrix, distance_matrix
+
+    def _verify_feasibility(self, precedence_matrix, color_matrix, problem_size, color_size):
+        """
+        Verify that a PCTSP instance is feasible:
+        1. Precedence constraints form a DAG (no cycles)
+        2. Each node has at least one color
+        3. Topological sort exists (guaranteed if DAG)
+
+        Args:
+            precedence_matrix: (problem_size, problem_size) bool tensor
+            color_matrix: (problem_size, color_size) bool tensor
+            problem_size: int
+            color_size: int
+
+        Returns:
+            bool: True if feasible, False otherwise
+        """
+        # Check 1: Verify DAG (no cycles in precedence constraints)
+        # Compute transitive closure
+        prec = precedence_matrix.float().clone()
+        for k in range(problem_size):
+            prec = prec | (prec[:, k:k + 1] & prec[k:k + 1, :])
+
+        # Check for cycles (diagonal should be all zeros)
+        if (prec.diagonal() > 0).any():
+            return False
+
+        # Check 2: Each node has at least one color
+        if not (color_matrix.sum(dim=1) >= 1).all():
+            return False
+
+        # Check 3: Topological sort exists (Kahn's algorithm)
+        # Build in-degree for each node
+        in_degree = precedence_matrix.sum(dim=0)  # (problem_size,)
+
+        # Find nodes with no incoming edges
+        queue = (in_degree == 0).nonzero(as_tuple=False).squeeze(-1).tolist()
+        if not queue:
+            # If no node has zero in-degree and there are edges, it's a cycle
+            if precedence_matrix.sum() > 0:
+                return False
+
+        # Perform topological sort
+        visited_count = 0
+        while queue:
+            node = queue.pop(0)
+            visited_count += 1
+
+            # Remove this node and update in-degrees
+            for j in range(problem_size):
+                if precedence_matrix[node, j]:
+                    in_degree[j] -= 1
+                    if in_degree[j] == 0:
+                        queue.append(j)
+
+        # All nodes should be visited if DAG
+        if visited_count < problem_size:
+            return False
+
+        return True
 
     def augment_xy_data_by_8_fold(self, xy_data):
         # xy_data.shape: (batch, N, 2)
@@ -540,7 +914,7 @@ class SOPEnv:
                     feasible_history.mean(1, keepdims=True) if t > (total_history - 2) else feasible_history[:,
                                                                                             :(t + 1)].mean(1,
                                                                                                            keepdims=True),
-                # note: slightly different from N2S due to shorter improvement steps; before/after?
+                    # note: slightly different from N2S due to shorter improvement steps; before/after?
                 ), 1)  # (batch_size, 4, solution_size)
         else:
             feasible_history[:, 1:] = feasible_history[:, :total_history - 1].clone()
@@ -550,13 +924,13 @@ class SOPEnv:
             feasible_history_pre = feasible_history[:, 1:]
             feasible_history_post = feasible_history[:, :total_history - 1]
             f_to_if = ((feasible_history_pre == True) & (feasible_history_post == False)).sum(1, True) / (
-                        total_history - 1)
+                    total_history - 1)
             f_to_f = ((feasible_history_pre == True) & (feasible_history_post == True)).sum(1, True) / (
-                        total_history - 1)
+                    total_history - 1)
             if_to_f = ((feasible_history_pre == False) & (feasible_history_post == True)).sum(1, True) / (
-                        total_history - 1)
+                    total_history - 1)
             if_to_if = ((feasible_history_pre == False) & (feasible_history_post == False)).sum(1, True) / (
-                        total_history - 1)
+                    total_history - 1)
             f_to_if_2 = f_to_if / (f_to_if + f_to_f + 1e-5)
             f_to_f_2 = f_to_f / (f_to_if + f_to_f + 1e-5)
             if_to_f_2 = if_to_f / (if_to_f + if_to_if + 1e-5)

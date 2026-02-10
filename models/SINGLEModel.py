@@ -59,11 +59,12 @@ class SINGLEModel(nn.Module):
     def LoRA_fusion(self):
         for name, module in self.named_modules():
             if isinstance(module, LoRALayer):
-                with torch.no_grad():
-                    module.original_layer.weight = nn.Parameter(module.original_layer.weight + module.lora_B @ module.lora_A)
+                with torch.inference_mode():
+                    with torch.amp.autocast("cuda") if torch.cuda.is_available() else torch.inference_mode():
+                        module.original_layer.weight = nn.Parameter(module.original_layer.weight + module.lora_B @ module.lora_A)
 
     def pre_forward(self, reset_state, z=None):
-        if not self.problem.startswith('TSP'):
+        if not self.problem.startswith('TSP') and self.problem != "SOP":
             depot_xy = reset_state.depot_xy
             # shape: (batch, 1, 2)
             node_demand = reset_state.node_demand
@@ -100,6 +101,43 @@ class SINGLEModel(nn.Module):
             node_demand = reset_state.node_demand
             node_draft_limit = reset_state.node_draft_limit
             feature = torch.cat((node_xy, node_demand[:, :, None], node_draft_limit[:, :, None]), dim=2)
+        elif self.problem in ["SOP"]:
+            precedence_matrix = reset_state.precedence_matrix
+            # Count number of -1 in each row: (batch, n, n) -> (batch, n, 1) => normalized
+            num_successors = (precedence_matrix == -1).sum(dim=-1, keepdim=True) / precedence_matrix.size(-1)  # (batch, n, 1)
+            num_successors[:, -1] = 0.  # no successors for the end node
+            # Count number of -1 in each column: (batch, n, n) -> (batch, 1, n) => normalized
+            num_predecessors = (precedence_matrix == -1).sum(dim=1, keepdim=True).transpose(1, 2) / precedence_matrix.size(-1)  # (batch, n, 1)
+            num_predecessors[:, 0] = 0.  # no predecessors for the start node
+            feature = torch.cat((node_xy, num_successors, num_predecessors), dim=2) # (batch, n, 4)
+            # Check if "feature" mode is enabled (pairwise_merge can be a list)
+            pairwise_merge = self.model_params.get("pairwise_merge", [])
+            if isinstance(pairwise_merge, str):
+                pairwise_merge = [pairwise_merge]
+            if "feature" in pairwise_merge:
+                if self.model_params["which_feature"] in ["succ", "both"]:
+                    # Compute average coordinates of successor nodes
+                    succ_mask = (precedence_matrix.transpose(1, 2) == -1).float()  # (batch, n, n)
+                    succ_count = succ_mask.sum(dim=-1, keepdim=True) + 1e-8  # (batch, n, 1) - avoid division by zero
+                    succ_xy_sum = torch.matmul(succ_mask, node_xy)  # (batch, n, 2)
+                    succ_xy_mean = succ_xy_sum / succ_count  # (batch, n, 2) - average coordinates of successors
+                    feature = torch.cat((feature, succ_xy_mean), dim=2) # (batch, n, 6)
+                if self.model_params["which_feature"] in ["prec", "both"]:
+                    # Compute average coordinates of predecessor nodes
+                    pred_mask = (precedence_matrix == -1).float()  # (batch, n, n)
+                    pred_count = pred_mask.sum(dim=-1, keepdim=True) + 1e-8  # (batch, n, 1) - avoid division by zero
+                    pred_xy_sum = torch.matmul(pred_mask, node_xy)  # (batch, n, 2)
+                    pred_xy_mean = pred_xy_sum / pred_count  # (batch, n, 2) - average coordinates of predecessors
+                    feature = torch.cat((feature, pred_xy_mean), dim=2) # (batch, n, 6/8)
+            # Save precedence_matrix for attention/embedding enhancement when pairwise_merge contains "attention" or "embedding"
+            pairwise_merge = self.model_params.get("pairwise_merge", [])
+            if isinstance(pairwise_merge, str):
+                pairwise_merge = [pairwise_merge]
+            if any(mode in ["attention", "embedding"] for mode in pairwise_merge):
+                self.precedence_matrix = precedence_matrix
+            else:
+                self.precedence_matrix = None
+            self.feature = feature
         elif self.problem in ["VRPTW", "OVRPTW", "VRPBTW", "VRPLTW", "OVRPBTW", "OVRPLTW", "VRPBLTW", "OVRPBLTW"]:
             node_tw_start = reset_state.node_tw_start
             node_tw_end = reset_state.node_tw_end
@@ -112,9 +150,11 @@ class SINGLEModel(nn.Module):
         # pdb.set_trace()
         if self.model_params["improve_steps"] > 0. and self.model_params["unified_encoder"]:
             if depot_xy is not None:
-                depot_xy = torch.cat((depot_xy, torch.zeros(batch_size, 1, self.model_params['supplement_feature_dim'])), dim=-1)
-            feature = torch.cat((feature, torch.zeros(batch_size, problem_size, self.model_params['supplement_feature_dim'])), dim=-1)
-        self.encoded_nodes = self.encoder(depot_xy, feature)
+                depot_xy = torch.cat((depot_xy, torch.zeros(batch_size, depot_xy.size(1), self.model_params['supplement_feature_dim'])), dim=-1)
+            feature = torch.cat((feature, torch.zeros(batch_size, feature.size(1), self.model_params['supplement_feature_dim'])), dim=-1)
+        # Pass precedence_matrix to encoder for attention/embedding enhancement when pairwise_merge == "attention" or "embedding"
+        succ_attention_bias = self.model_params.get("succ_attention_bias", 1.0)
+        self.encoded_nodes = self.encoder(depot_xy, feature, precedence_matrix=self.precedence_matrix if self.problem == "SOP" else None, succ_attention_bias=succ_attention_bias)
         # shape: (batch, problem(+1), embedding)
         # pdb.set_trace()
         if not self.model_params["improvement_only"] or self.model_params["unified_decoder"]: # construct or improve use POMO decoder
@@ -133,7 +173,9 @@ class SINGLEModel(nn.Module):
             features[:,:,2:3] = features[:,:,2:3] / tw_end_max
             features[:,:,3:] = features[:,:,3:] / tw_end_max
 
-        self.encoded_nodes = self.encoder(depot_xy, features)
+        succ_attention_bias = self.model_params.get("succ_attention_bias", 1.0)
+        precedence_matrix = getattr(self, 'precedence_matrix', None) if self.problem == "SOP" else None
+        self.encoded_nodes = self.encoder(depot_xy, features, precedence_matrix=precedence_matrix, succ_attention_bias=succ_attention_bias)
         # shape: (batch, problem(+1), embedding)
 
         return self.encoded_nodes, features
@@ -142,7 +184,7 @@ class SINGLEModel(nn.Module):
         batch_size, solution_size = rec.size()
         # supplementary node features based on current solution
         if self.problem in ['CVRP', "TSPTW", "VRPBLTW", "TSPDL"]:
-            visited_time, depot_feature, node_feature = env.get_dynamic_feature(context, self.model_params["with_infsb_feature"], tw_normalize=self.model_params["tw_normalize"])
+            visited_time, depot_feature, node_feature = env.get_dynamic_feature(context, self.model_params["with_infsb_feature"], tw_normalize=self.model_params["tw_normalize"], feature=self.feature if self.problem=="SOP" else None)
         else:
             raise NotImplementedError()
         # positional features based on current solution
@@ -151,10 +193,12 @@ class SINGLEModel(nn.Module):
         aux_scores = self.pos_encoder(h_pos)
         # shape:(batch_size, problem_size+dummy_size, embedding_dim)
         # get node embedding
+        succ_attention_bias = self.model_params.get("succ_attention_bias", 1.0)
+        precedence_matrix = self.precedence_matrix if self.problem == "SOP" else None
         if self.model_params['unified_encoder'] or self.model_params['improvement_only']:
-            h_em_final = self.encoder(depot_feature, node_feature, route_attn=aux_scores)  # already includes the supplementary features
+            h_em_final = self.encoder(depot_feature, node_feature, route_attn=aux_scores, precedence_matrix=precedence_matrix, succ_attention_bias=succ_attention_bias)  # already includes the supplementary features
         else:
-            h_em_final = self.kopt_encoder(depot_feature, node_feature, route_attn=aux_scores)
+            h_em_final = self.kopt_encoder(depot_feature, node_feature, route_attn=aux_scores, precedence_matrix=precedence_matrix, succ_attention_bias=succ_attention_bias)
         # shape:(batch_size, problem_size+dummy_size, embedding_dim)
         # average the depot embedding
         dummy_size = h_em_final.size(1) - env.problem_size
@@ -282,8 +326,8 @@ class SINGLEModel(nn.Module):
             # node_embedding = node_embedding.repeat_interleave(batch_size//node_embedding.size(0), 0)
             #
             # supplementary node features based on current solution
-            if self.problem in ['CVRP', "TSPTW", "VRPBLTW", "TSPDL"]:
-                visited_time, depot_feature, node_feature = env.get_dynamic_feature(context, self.model_params["with_infsb_feature"], tw_normalize=self.model_params["tw_normalize"])
+            if self.problem in ['CVRP', "TSPTW", "VRPBLTW", "TSPDL", "SOP"]:
+                visited_time, depot_feature, node_feature = env.get_dynamic_feature(context, self.model_params["with_infsb_feature"], tw_normalize=self.model_params["tw_normalize"], feature=self.feature if self.problem=="SOP" else None)
             # elif self.problem == 'TSP':
             #     visited_time = env.get_order(rec, return_solution=False)
             else:
@@ -296,10 +340,12 @@ class SINGLEModel(nn.Module):
             # shape:(batch_size, problem_size+dummy_size, embedding_dim)
 
             # get node embedding
+            succ_attention_bias = self.model_params.get("succ_attention_bias", 1.0)
+            precedence_matrix = self.precedence_matrix if self.problem == "SOP" else None
             if self.model_params['unified_encoder'] or self.model_params['improvement_only']:
-                h_em_final = self.encoder(depot_feature, node_feature, use_LoRA=use_LoRA, route_attn=aux_scores) # already includes the supplementary features
+                h_em_final = self.encoder(depot_feature, node_feature, use_LoRA=use_LoRA, route_attn=aux_scores, precedence_matrix=precedence_matrix, succ_attention_bias=succ_attention_bias) # already includes the supplementary features
             else:
-                h_em_final = self.kopt_encoder(depot_feature, node_feature, use_LoRA=use_LoRA, route_attn=aux_scores)
+                h_em_final = self.kopt_encoder(depot_feature, node_feature, use_LoRA=use_LoRA, route_attn=aux_scores, precedence_matrix=precedence_matrix, succ_attention_bias=succ_attention_bias)
 
 
             # # merge three embeddings
@@ -357,6 +403,8 @@ class SINGLEModel(nn.Module):
         elif self.problem in ["OVRPLTW", "OVRPBLTW"]:
             attr = torch.cat((state.load[:, :, None], state.current_time[:, :, None], state.length[:, :, None],
                               state.open[:, :, None]), dim=2)  # shape: (batch, pomo, 4)
+        elif self.problem in ["TSP", "SOP"]:
+            attr = None
         else:
             raise NotImplementedError
 
@@ -444,12 +492,25 @@ class SINGLE_Encoder(nn.Module):
         self.impr_encoder_start_idx = self.model_params["impr_encoder_start_idx"]
 
         feature_plus = supplement_feature_dim if self.model_params["improve_steps"] > 0. else 0
-        if not self.problem.startswith("TSP"):
+        if not self.problem.startswith("TSP") and self.problem != "SOP":
             self.embedding_depot = nn.Linear(2+feature_plus, embedding_dim)
+        
         if self.problem in ["CVRP", "OVRP", "VRPB", "VRPL", "VRPBL", "OVRPB", "OVRPL", "OVRPBL"]:
             self.embedding_node = nn.Linear(3+feature_plus, embedding_dim)
         elif self.problem in ["TSPTW", "TSPDL"]:
             self.embedding_node = nn.Linear(4+feature_plus, embedding_dim)
+        elif self.problem in ["SOP"]:
+            # Check if "feature" mode is enabled (pairwise_merge can be a list)
+            pairwise_merge = self.model_params.get("pairwise_merge", [])
+            if isinstance(pairwise_merge, str):
+                pairwise_merge = [pairwise_merge]
+            if "feature" in pairwise_merge:
+                if self.model_params.get("which_feature", None) == "both":
+                    self.embedding_node = nn.Linear(8+feature_plus, embedding_dim)
+                elif self.model_params.get("which_feature", None) in ["succ", "prec"]:
+                    self.embedding_node = nn.Linear(6+feature_plus, embedding_dim)
+            else:
+                self.embedding_node = nn.Linear(4+feature_plus, embedding_dim)
         elif self.problem in ["VRPTW", "OVRPTW", "VRPBTW", "VRPLTW", "OVRPBTW", "OVRPLTW", "VRPBLTW", "OVRPBLTW"]:
             self.embedding_node = nn.Linear(5+feature_plus, embedding_dim)
         else:
@@ -462,14 +523,33 @@ class SINGLE_Encoder(nn.Module):
         #     self.lora_A = nn.Parameter(torch.randn(embedding_dim, LoRA_rank))  # initialize to normal distribution
         #     self.lora_B = nn.Parameter(torch.zeros(LoRA_rank, embedding_dim))  # initialize to zeros
 
-    def forward(self, depot_xy, node_xy_demand_tw, use_LoRA=False, route_attn=None, dummy_size = 0):
+    def forward(self, depot_xy, node_xy_demand_tw, use_LoRA=False, route_attn=None, dummy_size = 0, precedence_matrix=None, succ_attention_bias=1.0):
         # depot_xy.shape: (batch, 1, 2) if self.problem is CVRP variants
         # node_xy_demand_tw.shape: (batch, problem, 3/4/5) - based on self.problem
+        # precedence_matrix: (batch, problem, problem) - for SOP, used for embedding merge (pairwise_merge=="embedding") or attention enhancement (pairwise_merge=="attention")
+        # succ_attention_bias: float - bias value to add to successor nodes' attention scores (only used when pairwise_merge=="attention")
         if depot_xy is not None:
             embedded_depot = self.embedding_depot(depot_xy)
             # shape: (batch, 1, embedding)
         embedded_node = self.embedding_node(node_xy_demand_tw)
         # shape: (batch, problem, embedding)
+        
+        # Merge with successor node embeddings when pairwise_merge contains "embedding" for SOP
+        pairwise_merge = self.model_params.get("pairwise_merge", [])
+        if isinstance(pairwise_merge, str):
+            pairwise_merge = [pairwise_merge]
+        if precedence_matrix is not None and "embedding" in pairwise_merge:
+            # precedence_matrix[j, i] == -1 means j is a successor of i
+            # Create successor mask: succ_mask[i, j] = 1 if j is a successor of i
+            succ_mask = (precedence_matrix.transpose(1, 2) == -1).float()  # (batch, problem, problem)
+            succ_count = succ_mask.sum(dim=-1, keepdim=True) + 1e-8  # (batch, problem, 1) - avoid division by zero
+            
+            # Compute average embedding of successor nodes
+            succ_emb_sum = torch.matmul(succ_mask, embedded_node)  # (batch, problem, embedding)
+            succ_emb_mean = succ_emb_sum / succ_count  # (batch, problem, embedding) - average embedding of successors
+            
+            # Add successor mean embedding to original embedding and then average
+            embedded_node = (embedded_node + succ_emb_mean) / 2.0  # (batch, problem, embedding)
 
         if depot_xy is not None:
             out = torch.cat((embedded_depot, embedded_node), dim=1)
@@ -480,11 +560,12 @@ class SINGLE_Encoder(nn.Module):
 
         # if use_LoRA:
         #     input = out.clone()
-        #     with torch.no_grad(): # not calculate the gradient of the large model if using LoRA
-        #         for layer in self.layers:
-        #             out = layer(out, route_attn)
-        #             if not self.training:
-        #                 torch.cuda.empty_cache()
+        #     with torch.inference_mode(): # not calculate the gradient of the large model if using LoRA
+        #         with torch.amp.autocast("cuda") if torch.cuda.is_available() else torch.inference_mode():
+        #             for layer in self.layers:
+        #                 out = layer(out, route_attn)
+        #                 if not self.training:
+        #                     torch.cuda.empty_cache()
         # else:
         layer_i = 0
         for layer in self.layers:
@@ -492,7 +573,7 @@ class SINGLE_Encoder(nn.Module):
             if route_attn is not None:
                 if torch.isnan(out).any():
                     print("logits contains NaN!")
-            out = layer(out, use_LoRA, route_attn)
+            out = layer(out, use_LoRA, route_attn, precedence_matrix=precedence_matrix, succ_attention_bias=succ_attention_bias)
             # if route_attn is not None and layer_i < self.impr_encoder_start_idx: # disabled layer in improvement
             #     layer_i += 1
             #     continue
@@ -551,11 +632,13 @@ class EncoderLayer(nn.Module):
             self.multi_head_combine = LoRALayer(self.multi_head_combine, LoRA_rank)
             self.feedForward.W1 = LoRALayer(self.feedForward.W1, LoRA_rank)
             self.feedForward.W2 = LoRALayer(self.feedForward.W2, LoRA_rank)
-    def multi_head_attention(self, q, k, v, route_attn=None, rank2_ninf_mask=None, rank3_ninf_mask=None):
+    def multi_head_attention(self, q, k, v, route_attn=None, rank2_ninf_mask=None, rank3_ninf_mask=None, precedence_matrix=None, succ_attention_bias=1.0):
         # q shape: (batch, head_num, n, key_dim)   : n can be either 1 or PROBLEM_SIZE
         # k,v shape: (batch, head_num, problem, key_dim)
         # rank2_ninf_mask.shape: (batch, problem)
         # rank3_ninf_mask.shape: (batch, group, problem)
+        # precedence_matrix: (batch, problem, problem) - for SOP, to enhance attention to successor nodes
+        # succ_attention_bias: float - bias value to add to successor nodes' attention scores
 
         batch_s = q.size(0)
         head_num = q.size(1)
@@ -566,6 +649,21 @@ class EncoderLayer(nn.Module):
 
         score = torch.matmul(q, k.transpose(2, 3))
         # shape: (batch, head_num, n, problem)
+        
+        # Enhance attention to successor nodes for SOP when pairwise_merge contains "attention"
+        # Check if "attention" mode is enabled (pairwise_merge can be a list)
+        pairwise_merge = self.model_params.get("pairwise_merge", [])
+        if isinstance(pairwise_merge, str):
+            pairwise_merge = [pairwise_merge]
+        if precedence_matrix is not None and "attention" in pairwise_merge and n == input_s:  # Only for self-attention in encoder
+            # precedence_matrix[j, i] == -1 means j is a successor of i
+            # Create successor mask: succ_mask[i, j] = 1 if j is a successor of i
+            k = score.size(0) // precedence_matrix.size(0)
+            succ_mask = (precedence_matrix.repeat_interleave(k, dim=0).transpose(1, 2) == -1).float()  # (batch, problem, problem)
+            # Expand to (batch, head_num, problem, problem)
+            succ_mask_expanded = succ_mask.unsqueeze(1).expand(batch_s, head_num, input_s, input_s)
+            # Add bias: score[i, j] += bias if j is successor of i
+            score = score + (score * succ_mask_expanded * succ_attention_bias)
 
         if route_attn is None:
             score_scaled = score / torch.sqrt(torch.tensor(key_dim, dtype=torch.float))
@@ -622,7 +720,7 @@ class EncoderLayer(nn.Module):
 
         return q_transposed
 
-    def forward(self, input1, use_LoRA, route_attn=None):
+    def forward(self, input1, use_LoRA, route_attn=None, precedence_matrix=None, succ_attention_bias=1.0):
         """
         Two implementations:
             norm_last: the original implementation of AM/POMO: MHA -> Add & Norm -> FFN/MOE -> Add & Norm
@@ -640,7 +738,7 @@ class EncoderLayer(nn.Module):
         # q shape: (batch, HEAD_NUM, problem, KEY_DIM)
 
         if self.norm_loc == "norm_last":
-            out_concat = self.multi_head_attention(q, k, v, route_attn=route_attn)  # (batch, problem, HEAD_NUM*KEY_DIM)
+            out_concat = self.multi_head_attention(q, k, v, route_attn=route_attn, precedence_matrix=precedence_matrix, succ_attention_bias=succ_attention_bias)  # (batch, problem, HEAD_NUM*KEY_DIM)
             if use_LoRA:
                 multi_head_out = self.multi_head_combine(out_concat, use_LoRA)  # (batch, problem, EMBEDDING_DIM)
             else:
@@ -734,6 +832,8 @@ class SINGLE_Decoder(nn.Module):
             self.Wq_last = nn.Linear(embedding_dim + 1, head_num * qkv_dim, bias=False)
             if self.model_params["pip_decoder"]:
                 self.Wq_last_sl = nn.Linear(embedding_dim + 1, head_num * qkv_dim, bias=False)
+        elif self.problem in ["TSP", "SOP"]:
+            self.Wq_last = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         elif self.problem in ["VRPB", "TSPTW", "TSPDL"]:
             self.Wq_last = nn.Linear(embedding_dim + 1, head_num * qkv_dim, bias=False)
             if self.model_params["pip_decoder"]:
@@ -882,7 +982,7 @@ class SINGLE_Decoder(nn.Module):
         if solver == "construction":
             #  Multi-Head Attention
             #######################################################
-            input_cat = torch.cat((encoded_last_node, attr), dim=2)
+            input_cat = torch.cat((encoded_last_node, attr), dim=2) if attr is not None else encoded_last_node
             # shape = (batch, group, EMBEDDING_DIM+1)
 
             if self.model_params['pip_decoder']:
@@ -980,14 +1080,15 @@ class SINGLE_Decoder(nn.Module):
             else: # TODO: add support for adaptive improvement
                 improvement_actions_num = 0
 
-            with torch.no_grad():
-                bs, gs, _, ll, action, entropys = *h_em_final.size(), 0.0, None, []  # bs = batch * topk
-                action_index = torch.zeros(bs, improvement_actions_num, dtype=torch.long).to(rec.device)
-                k_action_left = torch.zeros(bs, improvement_actions_num + 1, dtype=torch.long).to(rec.device) # bs * (k_max+1)
-                k_action_right = torch.zeros(bs, improvement_actions_num, dtype=torch.long).to(rec.device)
-                next_of_last_action = torch.zeros_like(rec[:, :1], dtype=torch.long).to(rec.device) - 1
-                mask = torch.zeros_like(rec, dtype=torch.bool).to(rec.device)
-                stopped = torch.ones(bs, dtype=torch.bool).to(rec.device)
+            with torch.inference_mode():
+                with torch.amp.autocast("cuda") if torch.cuda.is_available() else torch.inference_mode():
+                    bs, gs, _, ll, action, entropys = *h_em_final.size(), 0.0, None, []  # bs = batch * topk
+                    action_index = torch.zeros(bs, improvement_actions_num, dtype=torch.long).to(rec.device)
+                    k_action_left = torch.zeros(bs, improvement_actions_num + 1, dtype=torch.long).to(rec.device) # bs * (k_max+1)
+                    k_action_right = torch.zeros(bs, improvement_actions_num, dtype=torch.long).to(rec.device)
+                    next_of_last_action = torch.zeros_like(rec[:, :1], dtype=torch.long).to(rec.device) - 1
+                    mask = torch.zeros_like(rec, dtype=torch.bool).to(rec.device)
+                    stopped = torch.ones(bs, dtype=torch.bool).to(rec.device)
             if self.with_RNN:
                 q = self.init_hidden_W(h_em_final.mean(1)).clone()
             # use the averaged solution embeddings as the initial last move embedding?
@@ -1063,16 +1164,17 @@ class SINGLE_Decoder(nn.Module):
                 # shape: (bs, problem)
 
                 # Sample action for a_i
-                with torch.no_grad():
-                    if fixed_action is None:
-                        action = probs.multinomial(1)
-                        value_max, action_max = probs.max(-1, True)  ### fix bug of pytorch
-                        action = torch.where(1 - value_max.view(-1, 1) < 1e-5, action_max.view(-1, 1), action)  ### fix bug of pytorch
-                    else:
-                        action = fixed_action[:, i:i + 1]
-
-                    if i > 0 and improvement_method == "kopt":
-                        action = torch.where(stopped.unsqueeze(-1), action_index[:, :1], action)
+                with torch.inference_mode():
+                    with torch.amp.autocast("cuda") if torch.cuda.is_available() else torch.inference_mode():
+                        if fixed_action is None:
+                            action = probs.multinomial(1)
+                            value_max, action_max = probs.max(-1, True)  ### fix bug of pytorch
+                            action = torch.where(1 - value_max.view(-1, 1) < 1e-5, action_max.view(-1, 1), action)  ### fix bug of pytorch
+                        else:
+                            action = fixed_action[:, i:i + 1]
+    
+                        if i > 0 and improvement_method == "kopt":
+                            action = torch.where(stopped.unsqueeze(-1), action_index[:, :1], action)
 
                 # Record log_likelihood and Entropy
                 if self.training:
@@ -1082,70 +1184,72 @@ class SINGLE_Decoder(nn.Module):
                     else:
                         ll = ll + loss_now
                     if require_entropy:
-                        with torch.no_grad():
-                            dist = Categorical(probs, validate_args=False)
-                            entropys.append(dist.entropy())
+                        with torch.inference_mode():
+                            with torch.amp.autocast("cuda") if torch.cuda.is_available() else torch.inference_mode():
+                                dist = Categorical(probs, validate_args=False)
+                                entropys.append(dist.entropy())
 
                 # Prepare next input
                 input_q = h_em_final.gather(1, action.view(bs, 1, 1).expand(bs, 1, self.embedding_dim)).squeeze(1)
 
-                with torch.no_grad():
-                    if improvement_method == "kopt":
-                        # Store and Process actions
-                        next_of_new_action = rec.gather(1, action) # get next node of the new action
-                        action_index[:, i] = action.squeeze().clone()
-                        k_action_left[stopped, i] = action[stopped].squeeze().clone()
-                        k_action_right[~stopped, i - 1] = action[~stopped].squeeze().clone() # ?
-                        k_action_left[:, i + 1] = next_of_new_action.squeeze().clone()
-                        # Process if k-opt close
-                        # assert (input_q1[stopped] == input_q2[stopped]).all()
-                        stopped = stopped.clone()
-                        if i > 0:
-                            stopped = stopped | (action == next_of_last_action).squeeze() # if forming loops, stop the k-opt
-                        else:
-                            stopped = (action == next_of_last_action).squeeze()
-                        # assert (input_q1[stopped] == input_q2[stopped]).all()
-
-                        k_action_left[stopped, i] = k_action_left[stopped, i - 1]
-                        k_action_right[stopped, i] = k_action_right[stopped, i - 1]
-
-                        # Calc next basic masks # TODO: figure out why this works
-                        if i == 0:
-                            visited_time_tag = (visited_time - visited_time.gather(1, action)) % gs
-                        mask = mask.clone()
-                        mask &= False
-                        mask[(visited_time_tag <= visited_time_tag.gather(1, action))] = True
-                        if i == 0:
-                            mask[visited_time_tag > (gs - 2)] = True
-                        mask[stopped, action[stopped].squeeze()] = False  # allow next k-opt starts immediately
-                        # if True:#i == self.k_max - 2: # allow special case: close k-opt at the first selected node
-                        index_allow_first_node = (~stopped) & (next_of_new_action.squeeze() == action_index[:, 0])
-                        mask[index_allow_first_node, action_index[index_allow_first_node, 0]] = False
-
-                        # Move to next
-                        next_of_last_action = next_of_new_action
-                        next_of_last_action[stopped] = -1
-                    else: # remove and insert
-                        action_index[:, i] = action.squeeze().clone()
-                        mask = torch.zeros_like(rec, dtype=torch.bool).to(rec.device) # re-initialize mask
-                        if i % 2 == 0: # removal move -> mask some insertion nodes for the next iteration
-                            # mask 1: mask out removed nodes
-                            mask[torch.arange(bs), action.squeeze()] = True
-                            # mask 2: mask out the previous nodes of the removed nodes
-                            previous_nodes = get_previous_nodes(rec, action)
-                            mask[torch.arange(bs), previous_nodes.squeeze()] = True
-                            # mask 3: mask out the other depots if the removed node is a depot node?
-                            dummy_size = gs - self.model_params["problem_size"]
-                            is_depot = (action < dummy_size).squeeze()
-                            depot_mask = torch.zeros_like(mask, dtype=torch.bool)
-                            depot_mask[:, :dummy_size] = True  # Mask all depot nodes
-                            mask[is_depot] |= depot_mask[is_depot]
-                        else: # insertion move -> mask some removal nodes for the next iteration
-                            # Todo: consider dynamic stopping for removal
-                            # mask the previous removal nodes
-                            indices = torch.arange(i)[(torch.arange(i) % 2) == 0]
-                            selected_action_indices = action_index[:, indices]
-                            mask[torch.arange(bs)[:,None], selected_action_indices] = True
+                with torch.inference_mode():
+                    with torch.amp.autocast("cuda") if torch.cuda.is_available() else torch.inference_mode():
+                        if improvement_method == "kopt":
+                            # Store and Process actions
+                            next_of_new_action = rec.gather(1, action) # get next node of the new action
+                            action_index[:, i] = action.squeeze().clone()
+                            k_action_left[stopped, i] = action[stopped].squeeze().clone()
+                            k_action_right[~stopped, i - 1] = action[~stopped].squeeze().clone() # ?
+                            k_action_left[:, i + 1] = next_of_new_action.squeeze().clone()
+                            # Process if k-opt close
+                            # assert (input_q1[stopped] == input_q2[stopped]).all()
+                            stopped = stopped.clone()
+                            if i > 0:
+                                stopped = stopped | (action == next_of_last_action).squeeze() # if forming loops, stop the k-opt
+                            else:
+                                stopped = (action == next_of_last_action).squeeze()
+                            # assert (input_q1[stopped] == input_q2[stopped]).all()
+    
+                            k_action_left[stopped, i] = k_action_left[stopped, i - 1]
+                            k_action_right[stopped, i] = k_action_right[stopped, i - 1]
+    
+                            # Calc next basic masks # TODO: figure out why this works
+                            if i == 0:
+                                visited_time_tag = (visited_time - visited_time.gather(1, action)) % gs
+                            mask = mask.clone()
+                            mask &= False
+                            mask[(visited_time_tag <= visited_time_tag.gather(1, action))] = True
+                            if i == 0:
+                                mask[visited_time_tag > (gs - 2)] = True
+                            mask[stopped, action[stopped].squeeze()] = False  # allow next k-opt starts immediately
+                            # if True:#i == self.k_max - 2: # allow special case: close k-opt at the first selected node
+                            index_allow_first_node = (~stopped) & (next_of_new_action.squeeze() == action_index[:, 0])
+                            mask[index_allow_first_node, action_index[index_allow_first_node, 0]] = False
+    
+                            # Move to next
+                            next_of_last_action = next_of_new_action
+                            next_of_last_action[stopped] = -1
+                        else: # remove and insert
+                            action_index[:, i] = action.squeeze().clone()
+                            mask = torch.zeros_like(rec, dtype=torch.bool).to(rec.device) # re-initialize mask
+                            if i % 2 == 0: # removal move -> mask some insertion nodes for the next iteration
+                                # mask 1: mask out removed nodes
+                                mask[torch.arange(bs), action.squeeze()] = True
+                                # mask 2: mask out the previous nodes of the removed nodes
+                                previous_nodes = get_previous_nodes(rec, action)
+                                mask[torch.arange(bs), previous_nodes.squeeze()] = True
+                                # mask 3: mask out the other depots if the removed node is a depot node?
+                                dummy_size = gs - self.model_params["problem_size"]
+                                is_depot = (action < dummy_size).squeeze()
+                                depot_mask = torch.zeros_like(mask, dtype=torch.bool)
+                                depot_mask[:, :dummy_size] = True  # Mask all depot nodes
+                                mask[is_depot] |= depot_mask[is_depot]
+                            else: # insertion move -> mask some removal nodes for the next iteration
+                                # Todo: consider dynamic stopping for removal
+                                # mask the previous removal nodes
+                                indices = torch.arange(i)[(torch.arange(i) % 2) == 0]
+                                selected_action_indices = action_index[:, indices]
+                                mask[torch.arange(bs)[:,None], selected_action_indices] = True
 
             # Form final action
             if improvement_method == "kopt":
@@ -1351,9 +1455,10 @@ class kopt_Decoder(nn.Module):
                 else:
                     ll = ll + loss_now
                 if require_entropy:
-                    with torch.no_grad():
-                        dist = Categorical(probs, validate_args=False)
-                        entropys.append(dist.entropy())
+                    with torch.inference_mode():
+                        with torch.amp.autocast("cuda") if torch.cuda.is_available() else torch.inference_mode():
+                            dist = Categorical(probs, validate_args=False)
+                            entropys.append(dist.entropy())
 
             # Store and Process actions
             if improvement_method == "kopt":
@@ -1968,8 +2073,9 @@ class LoRALayer(nn.Module):
 
     def forward(self, x, use_LoRA=False):
         if use_LoRA:
-            with torch.no_grad():
-                original_out = self.original_layer(x)
+            with torch.inference_mode():
+                with torch.amp.autocast("cuda") if torch.cuda.is_available() else torch.inference_mode():
+                    original_out = self.original_layer(x)
             return original_out + x @ (self.lora_B @ self.lora_A).T
         else: # original layers have gradients
             return self.original_layer(x)
@@ -1980,6 +2086,3 @@ def sample_gumbel(t_like, eps=1e-10):
     # return -torch.log(-torch.log(u + eps) + eps)
     u = torch.empty_like(t_like, dtype=torch.float32).uniform_(eps, 1.0 - eps) # avoid 0 / 1
     return -torch.log(-torch.log(u))
-
-
-

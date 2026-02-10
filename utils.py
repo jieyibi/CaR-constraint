@@ -97,9 +97,11 @@ def seed_everything(seed=2023):
 
 
 def get_env(problem):
-    from envs import TSPDLEnv, TSPTWEnv, CVRPEnv, OVRPEnv, VRPBEnv, VRPLEnv, VRPTWEnv, OVRPTWEnv, OVRPBEnv, OVRPLEnv, VRPBLEnv, VRPBTWEnv, VRPLTWEnv, OVRPBLEnv, OVRPBTWEnv, OVRPLTWEnv, VRPBLTWEnv, OVRPBLTWEnv
+    from envs import TSPDLEnv, TSPTWEnv, CVRPEnv, OVRPEnv, VRPBEnv, VRPLEnv, VRPTWEnv, OVRPTWEnv, OVRPBEnv, OVRPLEnv, VRPBLEnv, VRPBTWEnv, VRPLTWEnv, OVRPBLEnv, OVRPBTWEnv, OVRPLTWEnv, VRPBLTWEnv, OVRPBLTWEnv, SOPEnv, PCTSPEnv
     training_problems = ['CVRP', 'OVRP', 'VRPB', 'VRPL', 'VRPTW', 'OVRPTW']
     all_problems = {
+        "PCTSP": PCTSPEnv.PCTSPEnv,
+        "SOP": SOPEnv.SOPEnv,
         'TSPTW': TSPTWEnv.TSPTWEnv,
         'TSPDL': TSPDLEnv.TSPDLEnv,
         'CVRP': CVRPEnv.CVRPEnv,
@@ -153,7 +155,7 @@ def get_opt_sol_path(dir, problem, size):
         'OVRPBL': {50: 'or_tools_200s_ovrpbl50_uniform.pkl', 100: 'or_tools_400s_ovrpbl100_uniform.pkl'},
         'OVRPBTW': {50: 'or_tools_200s_ovrpbtw50_uniform.pkl', 100: 'or_tools_400s_ovrpbtw100_uniform.pkl'},
         'OVRPLTW': {50: 'or_tools_200s_ovrpltw50_uniform.pkl', 100: 'or_tools_400s_ovrpltw100_uniform.pkl'},
-        'VRPBLTW': {50: 'or_tools_200s_vrpbltw50_uniform.pkl', 100: 'or_tools_400s_vrpbltw100_uniform.pkl'},
+        'VRPBLTW': {50: 'or_tools_200s_vrpbltw50_uniform.pkl', 100: 'or_tools_400s_vrpbltw100_uniform.pkl', 200: 'or_tools_800s_vrpbltw200_uniform.pkl', 500: 'or_tools_1200s_vrpbltw500_uniform.pkl'},
         'OVRPBLTW': {50: 'or_tools_200s_ovrpbltw50_uniform.pkl', 100: 'or_tools_400s_ovrpbltw100_uniform.pkl'},
     }
     return os.path.join(dir, all_opt_sol[problem][size])
@@ -418,6 +420,11 @@ def copy_all_src(dst_root):
 
         if hasattr(value, '__file__') and value.__file__:
             src_abspath = os.path.abspath(value.__file__)
+
+            # skip non-existent files
+            if not os.path.exists(src_abspath):
+                print(f"[copy_all_src] Warning: {src_abspath} not found. Skipping.")
+                continue
 
             if os.path.commonprefix([home_dir, src_abspath]) == home_dir:
                 dst_filepath = os.path.join(dst_path, os.path.basename(src_abspath))
@@ -754,23 +761,23 @@ class val_metric_logger:
     def _log_output(self, trainer):
 
 
-        if trainer.tester_params["refinement_history_path"] is not None:
-            # if trainer.tester_params["refinement_history_path"] is not None:
-            file_path = trainer.tester_params["refinement_history_path"]
-            torch.save(self.reward_history, "rebut/" + file_path + "_reward.pt")
-            print(self.reward_history.size())
-            torch.save(self.feasible_bsf_history, "rebut/" + file_path + "_fsb.pt" )
-            print(self.feasible_bsf_history.size())
-            torch.save(self.solution_history, "rebut/" + file_path + "_solution.pt")
-            print(self.solution_history.size())
-
-            all_pack = [
-                (r.item(), bool(f), s.tolist())
-                for r, f, s in zip(self.best_reward_all, self.best_feasible_all, self.best_solution_all)
-            ]
-            with open(trainer.tester_params["refinement_history_path"], 'wb') as f:
-                pickle.dump(all_pack, f, pickle.HIGHEST_PROTOCOL)
-            print(f"Best solution saved to {trainer.tester_params['best_solution_path']}, size: {self.best_solution_all.size()}")
+        # if trainer.tester_params["refinement_history_path"] is not None:
+        #     # if trainer.tester_params["refinement_history_path"] is not None:
+        #     file_path = trainer.tester_params["refinement_history_path"]
+        #     torch.save(self.reward_history, "rebut/" + file_path + "_reward.pt")
+        #     print(self.reward_history.size())
+        #     torch.save(self.feasible_bsf_history, "rebut/" + file_path + "_fsb.pt" )
+        #     print(self.feasible_bsf_history.size())
+        #     torch.save(self.solution_history, "rebut/" + file_path + "_solution.pt")
+        #     print(self.solution_history.size())
+        #
+        #     all_pack = [
+        #         (r.item(), bool(f), s.tolist())
+        #         for r, f, s in zip(self.best_reward_all, self.best_feasible_all, self.best_solution_all)
+        #     ]
+        #     with open(trainer.tester_params["refinement_history_path"], 'wb') as f:
+        #         pickle.dump(all_pack, f, pickle.HIGHEST_PROTOCOL)
+        #     print(f"Best solution saved to {trainer.tester_params['best_solution_path']}, size: {self.best_solution_all.size()}")
 
         # construction
         no_aug_score = self.construct_metrics["no_aug_score"]
@@ -804,6 +811,7 @@ class val_metric_logger:
 
             sol_infeasible_rate = self.improve_metrics["sol_infeasible_rate"]
             ins_infeasible_rate = self.improve_metrics["ins_infeasible_rate"]
+            self.improve_metrics["noaug_sol_infeasible_rate_list"] = round((1 - no_aug_feasible.mean().item()) * 100, 3)
             self.improve_metrics["sol_infeasible_rate_list"] = round(sol_infeasible_rate.avg.item() *100, 3)
             self.improve_metrics["ins_infeasible_rate_list"] = round(ins_infeasible_rate.avg.item() *100, 3)
             if trainer.trainer_params["reconstruct"]:
