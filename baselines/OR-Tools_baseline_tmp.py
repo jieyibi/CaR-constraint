@@ -396,7 +396,7 @@ def solve_or_tools_log(directory, name, depot, loc, demand, capacity, route_limi
 
     # Setting first solution heuristic (cheapest addition).
     search_parameters = pywrapcp.DefaultRoutingSearchParameters()
-    search_parameters.log_search = False  # print log
+    search_parameters.log_search = True  # print log
     search_parameters.time_limit.seconds = timelimit
     search_parameters.first_solution_strategy = (routing_enums_pb2.FirstSolutionStrategy.LOCAL_CHEAPEST_INSERTION)
     search_parameters.local_search_metaheuristic = (routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH)
@@ -422,20 +422,20 @@ def solve_or_tools_log(directory, name, depot, loc, demand, capacity, route_limi
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="OR-Tools baseline")
-    parser.add_argument('--problem', type=str, default="TSPTW", choices=["CVRP", "OVRP", "VRPB", "VRPL", "VRPTW", "OVRPTW",
+    parser.add_argument('--problem', type=str, default="VRPBLTW", choices=["CVRP", "OVRP", "VRPB", "VRPL", "VRPTW", "OVRPTW",
                                                                         "OVRPB", "OVRPL", "VRPBL", "VRPBTW", "VRPLTW",
                                                                         "OVRPBL", "OVRPBTW", "OVRPLTW", "VRPBLTW", "OVRPBLTW", "TSPTW"])
-    parser.add_argument("--datasets", nargs='+', default=["../data/TSPTW/tsptw100_zhang_uniform.pkl", ], help="Filename of the dataset(s) to evaluate")
+    parser.add_argument("--datasets", nargs='+', default=["/home/jieyi/unified_solver_1/data/VRPBLTW/vrpbltw50_uniform.pkl"], help="Filename of the dataset(s) to evaluate")
     parser.add_argument("-f", action='store_false', help="Set true to overwrite")
     parser.add_argument("-o", default=None, help="Name of the results file to write")
-    parser.add_argument("--cpus", type=int, default=8, help="Number of CPUs to use, defaults to all cores")
+    parser.add_argument("--cpus", type=int, default=16, help="Number of CPUs to use, defaults to all cores")
     parser.add_argument('--progress_bar_mininterval', type=float, default=0.1, help='Minimum interval')
-    parser.add_argument('-n', type=int, default=10000, help="Number of instances to process")
-    parser.add_argument('-timelimit', type=int, default=40, help="timelimit (seconds) for OR-Tools to solve an instance")
+    parser.add_argument('-n', type=int, default=1000, help="Number of instances to process")
+    parser.add_argument('-timelimit', type=int, default=200, help="timelimit (seconds) for OR-Tools to solve an instance")
     parser.add_argument('-seed', type=int, default=1234, help="random seed")
     parser.add_argument('--offset', type=int, default=0, help="Offset where to start processing")
-    parser.add_argument('--results_dir', default='baseline_results', help="Name of results directory")
-    parser.add_argument('--lkh', default='../data/TSPTW/lkh_tsptw100_zhang_uniform.pkl', help="directory to lkh3")
+    parser.add_argument('--results_dir', default='baseline_results_0', help="Name of results directory")
+    parser.add_argument('--lkh', default=None, help="directory to lkh3")
 
     opts = parser.parse_args()
     assert opts.o is None or len(opts.datasets) == 1, "Cannot specify result filename with more than one dataset"
