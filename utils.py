@@ -128,17 +128,6 @@ def get_env(problem):
     else:
         return [all_problems[problem]]
 
-
-def get_model(model_type):
-    from models import MOEModel, SINGLEModel, MTLModel
-    if model_type == "MTL":
-        return MTLModel.MTLModel
-    elif model_type == "MOE":
-        return MOEModel.MOEModel
-    else:
-        return SINGLEModel.SINGLEModel
-
-
 def get_opt_sol_path(dir, problem, size):
     all_opt_sol = {
         'CVRP': {50: 'hgs_cvrp50_uniform.pkl', 100: 'hgs_cvrp100_uniform.pkl'},

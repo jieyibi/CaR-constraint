@@ -55,9 +55,8 @@ def args2dict(args):
     model_params = {"embedding_dim": args.embedding_dim, "sqrt_embedding_dim": args.sqrt_embedding_dim,
                     "encoder_layer_num": args.encoder_layer_num, "decoder_layer_num": args.decoder_layer_num,
                     "qkv_dim": args.qkv_dim, "head_num": args.head_num, "logit_clipping": args.logit_clipping,
-                    "ff_hidden_dim": args.ff_hidden_dim, "num_experts": args.num_experts, "eval_type": args.eval_type,
-                    "norm": args.norm, "norm_loc": args.norm_loc, "expert_loc": args.expert_loc, "problem": args.problem,
-                    "topk": args.topk, "routing_level": args.routing_level, "routing_method": args.routing_method,
+                    "ff_hidden_dim": args.ff_hidden_dim, "eval_type": args.eval_type,
+                    "norm": args.norm, "norm_loc": args.norm_loc, "problem": args.problem,
                     "dual_decoder": args.dual_decoder, "clean_cache": args.clean_cache,
                     "gumbel": args.gumbel,
                     # improvement
