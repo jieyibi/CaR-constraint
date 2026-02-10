@@ -6,9 +6,7 @@ from utils import *
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate datasets")
-    parser.add_argument('--problem', type=str, default="SOP", choices=["ALL", "CVRP", "OVRP", "VRPB", "VRPL", "VRPTW", "OVRPTW",
-                                                                       "OVRPB", "OVRPL", "VRPBL", "VRPBTW", "VRPLTW", "SOP", "PCTSP"
-                                                                       "OVRPBL", "OVRPBTW", "OVRPLTW", "VRPBLTW", "OVRPBLTW"])
+    parser.add_argument('--problem', type=str, default="SOP", choices=["CVRP", "TSPTW", "TSPDL", "VRPBLTW", "SOP"])
     parser.add_argument('--limited_vehicle_number', type=int, default=0, choices=["adaptive", "plus1"])
     parser.add_argument('--problem_size', type=int, default=50)
     parser.add_argument('--pomo_size', type=int, default=50, help="the number of start node, should <= problem size")
@@ -26,10 +24,17 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     pp.pprint(vars(args))
-    env_params = {"problem_size": args.problem_size, "pomo_size": args.pomo_size, "tw_type": args.tw_type,
-                  "dl_percent": args.dl_percent, "tw_duration": args.tw_duration,
-                  "limited_vehicle_number": args.limited_vehicle_number, "precedence_ratio": args.precedence_ratio,
-                  "geometric_conflict_ratio": args.geometric_conflict_ratio, "precedence_balance_ratio": args.precedence_balance_ratio}
+    env_params = {
+        "problem_size": args.problem_size,
+        "pomo_size": args.pomo_size,
+        "tw_type": args.tw_type,
+        "dl_percent": args.dl_percent,
+        "tw_duration": args.tw_duration,
+        "limited_vehicle_number": args.limited_vehicle_number,
+        "precedence_ratio": args.precedence_ratio,
+        "geometric_conflict_ratio": args.geometric_conflict_ratio,
+        "precedence_balance_ratio": args.precedence_balance_ratio,
+    }
     seed_everything(args.seed)
 
     # set log & gpu
@@ -46,15 +51,15 @@ if __name__ == "__main__":
     for env in envs:
         env = env(**env_params)
         if args.problem == "TSPTW":
-            dataset_path = os.path.join(args.dir, env.problem, "{}{}_{}_uniform_varyN.pkl".format(env.problem.lower(), args.problem_size, args.tw_type))
+            dataset_path = os.path.join(args.dir, env.problem, f"{env.problem.lower()}{args.problem_size}_{args.tw_type}_uniform_varyN.pkl",)
         elif args.problem == "TSPDL":
-            dataset_path = os.path.join(args.dir, env.problem, "{}{}_q{}_uniform_fsb.pkl".format(env.problem.lower(), args.problem_size, args.dl_percent))
+            dataset_path = os.path.join(args.dir, env.problem, f"{env.problem.lower()}{args.problem_size}_q{args.dl_percent}_uniform_fsb.pkl",)
         elif args.problem == "SOP":
-            dataset_path = os.path.join(args.dir, env.problem, "{}{}_uniform_prec{}_geom{}_bal{}.pkl".format(env.problem.lower(), args.problem_size, args.precedence_ratio, args.geometric_conflict_ratio, args.precedence_balance_ratio))
-        elif args.problem in ["CVRP", "VRPTW"] and args.limited_vehicle_number is not None:
-            dataset_path = os.path.join(args.dir, env.problem,"{}{}_uniform_LV{}.pkl".format(env.problem.lower(), args.problem_size, args.limited_vehicle_number))
+            dataset_path = os.path.join(args.dir, env.problem, f"{env.problem.lower()}{args.problem_size}_uniform_prec{args.precedence_ratio}_geom{args.geometric_conflict_ratio}_bal{args.precedence_balance_ratio}.pkl",)
+        elif args.problem == "CVRP" and args.limited_vehicle_number is not None:
+            dataset_path = os.path.join(args.dir, env.problem, f"{env.problem.lower()}{args.problem_size}_uniform_LV{args.limited_vehicle_number}.pkl")
         else:
-            dataset_path = os.path.join(args.dir, env.problem, "{}{}_uniform.pkl".format(env.problem.lower(), args.problem_size))
+            dataset_path = os.path.join(args.dir, env.problem, f"{env.problem.lower()}{args.problem_size}_uniform.pkl")
 
         env.generate_dataset(args.num_samples, args.problem_size, dataset_path)
         # sanity check

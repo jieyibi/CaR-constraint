@@ -97,56 +97,38 @@ def seed_everything(seed=2023):
 
 
 def get_env(problem):
-    from envs import TSPDLEnv, TSPTWEnv, CVRPEnv, OVRPEnv, VRPBEnv, VRPLEnv, VRPTWEnv, OVRPTWEnv, OVRPBEnv, OVRPLEnv, VRPBLEnv, VRPBTWEnv, VRPLTWEnv, OVRPBLEnv, OVRPBTWEnv, OVRPLTWEnv, VRPBLTWEnv, OVRPBLTWEnv, SOPEnv, PCTSPEnv
-    training_problems = ['CVRP', 'OVRP', 'VRPB', 'VRPL', 'VRPTW', 'OVRPTW']
+    from envs import TSPDLEnv, TSPTWEnv, CVRPEnv, VRPBLTWEnv, SOPEnv
+
     all_problems = {
-        "PCTSP": PCTSPEnv.PCTSPEnv,
+        "CVRP": CVRPEnv.CVRPEnv,
+        "TSPTW": TSPTWEnv.TSPTWEnv,
+        "TSPDL": TSPDLEnv.TSPDLEnv,
+        "VRPBLTW": VRPBLTWEnv.VRPBLTWEnv,
         "SOP": SOPEnv.SOPEnv,
-        'TSPTW': TSPTWEnv.TSPTWEnv,
-        'TSPDL': TSPDLEnv.TSPDLEnv,
-        'CVRP': CVRPEnv.CVRPEnv,
-        'OVRP': OVRPEnv.OVRPEnv,
-        'VRPB': VRPBEnv.VRPBEnv,
-        'VRPL': VRPLEnv.VRPLEnv,
-        'VRPTW': VRPTWEnv.VRPTWEnv,
-        'OVRPTW': OVRPTWEnv.OVRPTWEnv,
-        'OVRPB': OVRPBEnv.OVRPBEnv,
-        'OVRPL': OVRPLEnv.OVRPLEnv,
-        'VRPBL': VRPBLEnv.VRPBLEnv,
-        'VRPBTW': VRPBTWEnv.VRPBTWEnv,
-        'VRPLTW': VRPLTWEnv.VRPLTWEnv,
-        'OVRPBL': OVRPBLEnv.OVRPBLEnv,
-        'OVRPBTW': OVRPBTWEnv.OVRPBTWEnv,
-        'OVRPLTW': OVRPLTWEnv.OVRPLTWEnv,
-        'VRPBLTW': VRPBLTWEnv.VRPBLTWEnv,
-        'OVRPBLTW': OVRPBLTWEnv.OVRPBLTWEnv,
     }
-    if problem == "Train_ALL":
-        return [all_problems[i] for i in training_problems]
+
+    if problem in all_problems:
+        return [all_problems[problem]]
     elif problem == "ALL":
         return list(all_problems.values())
     else:
-        return [all_problems[problem]]
+        raise ValueError(f"Unsupported problem '{problem}'. Supported problems: {list(all_problems.keys())}")
 
 def get_opt_sol_path(dir, problem, size):
     all_opt_sol = {
-        'CVRP': {50: 'hgs_cvrp50_uniform.pkl', 100: 'hgs_cvrp100_uniform.pkl'},
-        'OVRP': {50: 'or_tools_200s_ovrp50_uniform.pkl', 100: 'lkh_ovrp100_uniform.pkl'},
-        'VRPB': {50: 'or_tools_200s_vrpb50_uniform.pkl', 100: 'or_tools_400s_vrpb100_uniform.pkl'},
-        'VRPL': {50: 'or_tools_200s_vrpl50_uniform.pkl', 100: 'lkh_vrpl100_uniform.pkl'},
-        'VRPTW': {50: 'hgs_vrptw50_uniform.pkl', 100: 'hgs_vrptw100_uniform.pkl'},
-        'OVRPTW': {50: 'or_tools_200s_ovrptw50_uniform.pkl', 100: 'or_tools_400s_ovrptw100_uniform.pkl'},
-        'OVRPB': {50: 'or_tools_200s_ovrpb50_uniform.pkl', 100: 'or_tools_400s_ovrpb100_uniform.pkl'},
-        'OVRPL': {50: 'or_tools_200s_ovrpl50_uniform.pkl', 100: 'or_tools_400s_ovrpl100_uniform.pkl'},
-        'VRPBL': {50: 'or_tools_200s_vrpbl50_uniform.pkl', 100: 'or_tools_400s_vrpbl100_uniform.pkl'},
-        'VRPBTW': {50: 'or_tools_200s_vrpbtw50_uniform.pkl', 100: 'or_tools_400s_vrpbtw100_uniform.pkl'},
-        'VRPLTW': {50: 'or_tools_200s_vrpltw50_uniform.pkl', 100: 'or_tools_400s_vrpltw100_uniform.pkl'},
-        'OVRPBL': {50: 'or_tools_200s_ovrpbl50_uniform.pkl', 100: 'or_tools_400s_ovrpbl100_uniform.pkl'},
-        'OVRPBTW': {50: 'or_tools_200s_ovrpbtw50_uniform.pkl', 100: 'or_tools_400s_ovrpbtw100_uniform.pkl'},
-        'OVRPLTW': {50: 'or_tools_200s_ovrpltw50_uniform.pkl', 100: 'or_tools_400s_ovrpltw100_uniform.pkl'},
-        'VRPBLTW': {50: 'or_tools_200s_vrpbltw50_uniform.pkl', 100: 'or_tools_400s_vrpbltw100_uniform.pkl', 200: 'or_tools_800s_vrpbltw200_uniform.pkl', 500: 'or_tools_1200s_vrpbltw500_uniform.pkl'},
-        'OVRPBLTW': {50: 'or_tools_200s_ovrpbltw50_uniform.pkl', 100: 'or_tools_400s_ovrpbltw100_uniform.pkl'},
+        "CVRP": {
+            50: "hgs_cvrp50_uniform.pkl",
+            100: "hgs_cvrp100_uniform.pkl",
+        },
+        "VRPBLTW": {
+            50: "or_tools_200s_vrpbltw50_uniform.pkl",
+            100: "or_tools_400s_vrpbltw100_uniform.pkl",
+            200: "or_tools_800s_vrpbltw200_uniform.pkl",
+            500: "or_tools_1200s_vrpbltw500_uniform.pkl",
+        },
     }
+    if problem not in all_opt_sol or size not in all_opt_sol[problem]:
+        raise ValueError(f"No optimal-solution file configured for problem={problem}, size={size}")
     return os.path.join(dir, all_opt_sol[problem][size])
 
 

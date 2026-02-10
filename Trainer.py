@@ -1406,10 +1406,8 @@ class Trainer:
             if self.rank == 0: print("PIP-D Validation, Auc: {:.4f}, Infeasible Auc: {:.4f} ({}), Feasible Auc: {:.4f} ({})".format(accuracy, infsb_accuracy,(fn + tp), fsb_accuracy,(tn + fp)))
         self.val_metric_logger._log_output(self)
 
-        try:
-            sol_path = get_opt_sol_path(dir, env.problem, data[1].size(1))
-        except:
-            sol_path = os.path.join(dir, "lkh_" + val_path)
+        sol_path = get_opt_sol_path(dir, env.problem, data[1].size(1)) if env.problem in ["CVRP", "VRPBLTW"] else os.path.join(dir, "lkh_" + val_path)
+        print(f">> Load optimal solution from: {sol_path}")
 
         compute_gap = os.path.exists(sol_path) if not self.tester_params["is_lib"] else False
 
