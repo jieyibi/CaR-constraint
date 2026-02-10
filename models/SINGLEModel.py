@@ -56,13 +56,6 @@ class SINGLEModel(nn.Module):
         self.device = torch.device('cuda', torch.cuda.current_device()) if 'device' not in model_params.keys() else model_params['device']
         # shape: (batch, problem+1, EMBEDDING_DIM)
 
-    def LoRA_fusion(self):
-        for name, module in self.named_modules():
-            if isinstance(module, LoRALayer):
-                with torch.inference_mode():
-                    with torch.amp.autocast("cuda") if torch.cuda.is_available() else torch.inference_mode():
-                        module.original_layer.weight = nn.Parameter(module.original_layer.weight + module.lora_B @ module.lora_A)
-
     def pre_forward(self, reset_state, z=None):
         if not self.problem.startswith('TSP') and self.problem != "SOP":
             depot_xy = reset_state.depot_xy
@@ -210,7 +203,7 @@ class SINGLEModel(nn.Module):
         self.eval_type = eval_type
 
     def forward(self, state, solver="construction", selected=None, pomo = False, candidate_feature=None,
-                feasible_start = None, return_probs=False, require_entropy=False, fixed_action = None, use_LoRA=False,
+                feasible_start = None, return_probs=False, require_entropy=False, fixed_action = None,
                 use_predicted_PI_mask=False, no_select_prob=False, EAS_incumbent_action=None):
 
         if solver == "construction":
@@ -343,9 +336,9 @@ class SINGLEModel(nn.Module):
             succ_attention_bias = self.model_params.get("succ_attention_bias", 1.0)
             precedence_matrix = self.precedence_matrix if self.problem == "SOP" else None
             if self.model_params['unified_encoder'] or self.model_params['improvement_only']:
-                h_em_final = self.encoder(depot_feature, node_feature, use_LoRA=use_LoRA, route_attn=aux_scores, precedence_matrix=precedence_matrix, succ_attention_bias=succ_attention_bias) # already includes the supplementary features
+                h_em_final = self.encoder(depot_feature, node_feature, route_attn=aux_scores, precedence_matrix=precedence_matrix, succ_attention_bias=succ_attention_bias) # already includes the supplementary features
             else:
-                h_em_final = self.kopt_encoder(depot_feature, node_feature, use_LoRA=use_LoRA, route_attn=aux_scores, precedence_matrix=precedence_matrix, succ_attention_bias=succ_attention_bias)
+                h_em_final = self.kopt_encoder(depot_feature, node_feature, route_attn=aux_scores, precedence_matrix=precedence_matrix, succ_attention_bias=succ_attention_bias)
 
 
             # # merge three embeddings
@@ -518,12 +511,7 @@ class SINGLE_Encoder(nn.Module):
         # self.layers = nn.ModuleList([EncoderLayer(**model_params) for _ in range(encoder_layer_num)])
         self.layers = nn.ModuleList([EncoderLayer(layer_idx=i, **model_params) for i in range(encoder_layer_num)])
 
-        # if self.model_params["use_LoRA"]:
-        #     LoRA_rank = self.model_params["LoRA_rank"]
-        #     self.lora_A = nn.Parameter(torch.randn(embedding_dim, LoRA_rank))  # initialize to normal distribution
-        #     self.lora_B = nn.Parameter(torch.zeros(LoRA_rank, embedding_dim))  # initialize to zeros
-
-    def forward(self, depot_xy, node_xy_demand_tw, use_LoRA=False, route_attn=None, dummy_size = 0, precedence_matrix=None, succ_attention_bias=1.0):
+    def forward(self, depot_xy, node_xy_demand_tw, route_attn=None, dummy_size = 0, precedence_matrix=None, succ_attention_bias=1.0):
         # depot_xy.shape: (batch, 1, 2) if self.problem is CVRP variants
         # node_xy_demand_tw.shape: (batch, problem, 3/4/5) - based on self.problem
         # precedence_matrix: (batch, problem, problem) - for SOP, used for embedding merge (pairwise_merge=="embedding") or attention enhancement (pairwise_merge=="attention")
@@ -558,22 +546,13 @@ class SINGLE_Encoder(nn.Module):
             out = embedded_node
             # shape: (batch, problem, embedding)
 
-        # if use_LoRA:
-        #     input = out.clone()
-        #     with torch.inference_mode(): # not calculate the gradient of the large model if using LoRA
-        #         with torch.amp.autocast("cuda") if torch.cuda.is_available() else torch.inference_mode():
-        #             for layer in self.layers:
-        #                 out = layer(out, route_attn)
-        #                 if not self.training:
-        #                     torch.cuda.empty_cache()
-        # else:
         layer_i = 0
         for layer in self.layers:
             # only enable the last few layers
             if route_attn is not None:
                 if torch.isnan(out).any():
                     print("logits contains NaN!")
-            out = layer(out, use_LoRA, route_attn, precedence_matrix=precedence_matrix, succ_attention_bias=succ_attention_bias)
+            out = layer(out, route_attn, precedence_matrix=precedence_matrix, succ_attention_bias=succ_attention_bias)
             # if route_attn is not None and layer_i < self.impr_encoder_start_idx: # disabled layer in improvement
             #     layer_i += 1
             #     continue
@@ -582,10 +561,6 @@ class SINGLE_Encoder(nn.Module):
             #     out = layer(out, route_attn)
             if not self.training and self.model_params["clean_cache"]:
                 torch.cuda.empty_cache()
-
-        # if use_LoRA: # this implementation uses the whole encoder as the W0 (cannot merge AB to W0)
-        #     out = out + (input @ self.lora_A @ self.lora_B)
-
 
         return out
         # shape: (batch, problem+1, embedding)
@@ -624,14 +599,6 @@ class EncoderLayer(nn.Module):
         # else:
         #     self.attention_fn = multi_head_attention
 
-        if self.model_params["use_LoRA"]:
-            LoRA_rank = self.model_params["LoRA_rank"]
-            self.Wq = LoRALayer(self.Wq, LoRA_rank)
-            self.Wk = LoRALayer(self.Wk, LoRA_rank)
-            self.Wv = LoRALayer(self.Wv, LoRA_rank)
-            self.multi_head_combine = LoRALayer(self.multi_head_combine, LoRA_rank)
-            self.feedForward.W1 = LoRALayer(self.feedForward.W1, LoRA_rank)
-            self.feedForward.W2 = LoRALayer(self.feedForward.W2, LoRA_rank)
     def multi_head_attention(self, q, k, v, route_attn=None, rank2_ninf_mask=None, rank3_ninf_mask=None, precedence_matrix=None, succ_attention_bias=1.0):
         # q shape: (batch, head_num, n, key_dim)   : n can be either 1 or PROBLEM_SIZE
         # k,v shape: (batch, head_num, problem, key_dim)
@@ -720,38 +687,30 @@ class EncoderLayer(nn.Module):
 
         return q_transposed
 
-    def forward(self, input1, use_LoRA, route_attn=None, precedence_matrix=None, succ_attention_bias=1.0):
+    def forward(self, input1, route_attn=None, precedence_matrix=None, succ_attention_bias=1.0):
         """
         Two implementations:
             norm_last: the original implementation of AM/POMO: MHA -> Add & Norm -> FFN/MOE -> Add & Norm
             norm_first: the convention in NLP: Norm -> MHA -> Add -> Norm -> FFN/MOE -> Add
         """
         # input.shape: (batch, problem, EMBEDDING_DIM)
-        if use_LoRA:
-            q = self.reshape_by_heads(self.Wq(input1, use_LoRA))
-            k = self.reshape_by_heads(self.Wk(input1, use_LoRA))
-            v = self.reshape_by_heads(self.Wv(input1, use_LoRA))
-        else:
-            q = self.reshape_by_heads(self.Wq(input1))
-            k = self.reshape_by_heads(self.Wk(input1))
-            v = self.reshape_by_heads(self.Wv(input1))
+        q = self.reshape_by_heads(self.Wq(input1))
+        k = self.reshape_by_heads(self.Wk(input1))
+        v = self.reshape_by_heads(self.Wv(input1))
         # q shape: (batch, HEAD_NUM, problem, KEY_DIM)
 
         if self.norm_loc == "norm_last":
             out_concat = self.multi_head_attention(q, k, v, route_attn=route_attn, precedence_matrix=precedence_matrix, succ_attention_bias=succ_attention_bias)  # (batch, problem, HEAD_NUM*KEY_DIM)
-            if use_LoRA:
-                multi_head_out = self.multi_head_combine(out_concat, use_LoRA)  # (batch, problem, EMBEDDING_DIM)
-            else:
-                multi_head_out = self.multi_head_combine(out_concat)  # (batch, problem, EMBEDDING_DIM)
+            multi_head_out = self.multi_head_combine(out_concat)  # (batch, problem, EMBEDDING_DIM)
             out1 = self.addAndNormalization1(input1, multi_head_out)
-            out2 = self.feedForward(out1, use_LoRA)
+            out2 = self.feedForward(out1)
             out3 = self.addAndNormalization2(out1, out2)  # (batch, problem, EMBEDDING_DIM)
         else:
             out1 = self.addAndNormalization1(None, input1)
             multi_head_out = self.multi_head_combine(out1)
             input2 = input1 + multi_head_out
             out2 = self.addAndNormalization2(None, input2)
-            out2 = self.feedForward(out2, use_LoRA)
+            out2 = self.feedForward(out2)
             out3 = input2 + out2
 
         return out3
@@ -875,15 +834,6 @@ class SINGLE_Decoder(nn.Module):
         # self.q2 = None  # saved q2, for multi-head attention
 
         self.use_EAS_layers = False
-        if self.model_params["polynet"]:
-            self.poly_layer_1 = nn.Linear(embedding_dim + z_dim, poly_embedding_dim)
-            self.poly_layer_2 = nn.Linear(poly_embedding_dim, embedding_dim)
-            # initialize t zeros as in the original_paper: https://arxiv.org/abs/2402.14048
-            # but not implement in the code?
-            nn.init.zeros_(self.poly_layer_1.weight)
-            nn.init.zeros_(self.poly_layer_1.bias)
-            nn.init.zeros_(self.poly_layer_2.weight)
-            nn.init.zeros_(self.poly_layer_2.bias)
 
         if self.model_params['use_fast_attention']:
             self.attention_fn = fast_multi_head_attention
@@ -1015,25 +965,6 @@ class SINGLE_Decoder(nn.Module):
             # shape: (batch, pomo, head_num*qkv_dim)
             mh_atten_out = self.multi_head_combine(out_concat)
             # shape: (batch, pomo, embedding)
-            ###################Poly net #################
-            if self.model_params["polynet"]:
-                if not self.use_EAS_layers:
-                    poly_out = self.poly_layer_1(torch.cat((mh_atten_out, self.z), dim=2))
-                    # shape: ?
-                    poly_out = F.relu(poly_out)
-                    # shape: ?
-                    poly_out = self.poly_layer_2(poly_out)
-                    # shape: ?
-                else:
-                    poly_out = torch.matmul(torch.cat((mh_atten_out, self.z), dim=2), self.EAS_W1)
-                    poly_out += self.EAS_b1[:, None]
-                    # shape: ?
-                    poly_out = F.relu(poly_out)
-                    # shape: ?
-                    poly_out = torch.matmul(poly_out, self.EAS_W2)
-                    # shape: ?
-                    poly_out += self.EAS_b2[:, None]
-                mh_atten_out += poly_out
             # EAS Layer Insert
             #######################################################
             if self.use_EAS_layers:
@@ -1119,28 +1050,6 @@ class SINGLE_Decoder(nn.Module):
                 # shape: (bs, 1, head_num*qkv_dim)
                 mh_atten_out = self.multi_head_combine(out_concat)
                 # shape: (bs, 1, embedding)
-                ###################Poly net #################
-                if self.model_params["polynet"]:
-                    topk = self.model_params["select_top_k"]
-                    mh_atten_out = mh_atten_out.reshape(-1, topk, self.model_params['embedding_dim'])
-                    assert topk == self.z.size(1), "topk not equal to rollout size of z vector"
-                    if not self.use_EAS_layers:
-                        poly_out = self.poly_layer_1(torch.cat((mh_atten_out, self.z), dim=2))
-                        # shape: ?
-                        poly_out = F.relu(poly_out)
-                        # shape: ?
-                        poly_out = self.poly_layer_2(poly_out)
-                        # shape: ?
-                    else:
-                        poly_out = torch.matmul(torch.cat((mh_atten_out, self.z), dim=2), self.EAS_W1)
-                        poly_out += self.EAS_b1[:, None]
-                        # shape: ?
-                        poly_out = F.relu(poly_out)
-                        # shape: ?
-                        poly_out = torch.matmul(poly_out, self.EAS_W2)
-                        # shape: ?
-                        poly_out += self.EAS_b2[:, None]
-                    mh_atten_out += poly_out
                 #  Single-Head Attention, for probability calculation
                 #######################################################
                 score = torch.matmul(mh_atten_out, self.single_head_key_improve)
@@ -2045,10 +1954,8 @@ class FeedForward(nn.Module):
         self.W1 = nn.Linear(embedding_dim, ff_hidden_dim)
         self.W2 = nn.Linear(ff_hidden_dim, embedding_dim)
 
-    def forward(self, input1, use_LoRA):
+    def forward(self, input1):
         # input.shape: (batch, problem, embedding)
-        if use_LoRA:
-            return self.W2(F.relu(self.W1(input1, use_LoRA)), use_LoRA)
         return self.W2(F.relu(self.W1(input1)))
 
 
@@ -2062,23 +1969,6 @@ class FC(nn.Module):
         # input.shape: (batch, problem, embedding)
         return F.relu(self.W1(input))
 
-
-class LoRALayer(nn.Module):
-    def __init__(self, original_layer, rank=4):
-        super().__init__()
-        self.original_layer = original_layer #d*k
-        self.rank = rank
-        self.lora_A = nn.Parameter(torch.randn(rank, original_layer.weight.size(1))) # initialize to normal distribution; r*k
-        self.lora_B = nn.Parameter(torch.zeros(original_layer.weight.size(0), rank)) # initialize to zeros; d*r
-
-    def forward(self, x, use_LoRA=False):
-        if use_LoRA:
-            with torch.inference_mode():
-                with torch.amp.autocast("cuda") if torch.cuda.is_available() else torch.inference_mode():
-                    original_out = self.original_layer(x)
-            return original_out + x @ (self.lora_B @ self.lora_A).T
-        else: # original layers have gradients
-            return self.original_layer(x)
 
 def sample_gumbel(t_like, eps=1e-10):
     # randomly sample standard gumbel variables

@@ -28,13 +28,12 @@ def args2dict(args):
                   "tw_type": args.tw_type, "tw_duration": args.tw_duration,
                   "dl_percent": args.dl_percent, "random_delta_t": args.random_delta_t,
                   "precedence_ratio": args.precedence_ratio, "geometric_conflict_ratio": args.geometric_conflict_ratio,
+                  "precedence_balance_ratio": args.precedence_balance_ratio,
                   "val_dataset": args.val_dataset, "val_episodes": args.val_episodes,
                   "pomo_start": args.pomo_start, "pomo_feasible_start": args.pomo_feasible_start,
                   "k_max": args.k_max,
                   # reward shaping
                   "with_regular": args.with_regular, "with_bonus": args.with_bonus,
-                  # poly_net
-                  "train_z_sample_size": args.train_z_sample_size
                   }
 
     tester_params = {"eval_only": args.eval_only, "test_episodes": args.test_episodes,
@@ -57,6 +56,9 @@ def args2dict(args):
                     "qkv_dim": args.qkv_dim, "head_num": args.head_num, "logit_clipping": args.logit_clipping,
                     "ff_hidden_dim": args.ff_hidden_dim, "eval_type": args.eval_type,
                     "norm": args.norm, "norm_loc": args.norm_loc, "problem": args.problem,
+                    "pairwise_merge": args.pairwise_merge.split(",") if isinstance(args.pairwise_merge, str) else args.pairwise_merge,
+                    "which_feature": args.which_feature,
+                    "succ_attention_bias": args.succ_attention_bias,
                     "dual_decoder": args.dual_decoder, "clean_cache": args.clean_cache,
                     "gumbel": args.gumbel,
                     # improvement
@@ -68,13 +70,8 @@ def args2dict(args):
                     "k_max": args.k_max, "impr_encoder_start_idx": args.impr_encoder_start_idx,
                     "select_top_k": args.select_top_k, "unified_decoder": args.unified_decoder,
                     "unified_encoder": args.unified_encoder, "n2s_decoder": args.n2s_decoder, "v_range": args.v_range,
-                    # polynet
-                    "polynet": args.polynet, "use_fast_attention": args.use_fast_attention,
-                    "z_dim": args.z_dim, "poly_embedding_dim": args.poly_embedding_dim,
                     # PIP-D
                     "pip_decoder": args.pip_decoder, "generate_PI_mask": args.generate_PI_mask,
-                    # LoRA
-                    "use_LoRA": args.use_LoRA, "LoRA_rank": args.LoRA_rank,
                     # TSPTW
                     "tw_normalize": args.tw_normalize,
                     }
@@ -124,11 +121,7 @@ def args2dict(args):
                       "validation_improve_steps": args.validation_improve_steps, "val_reconstruct_times": args.val_reconstruct_times,
                       "seperate_obj_penalty": args.seperate_obj_penalty,
                       "reconstruct": args.reconstruct, "reconstruct_improve_bonus": args.reconstruct_improve_bonus,
-                      # polynet
-                      "train_z_sample_size": args.train_z_sample_size, "val_z_sample_size": args.val_z_sample_size,
                       "amp_training": args.amp_training,
-                      # LoRA
-                      "LoRA_begin_step": args.LoRA_begin_step
                       }
 
     return env_params, model_params, optimizer_params, trainer_params, tester_params
@@ -150,7 +143,7 @@ def main(rank, world_size, args, env_params, model_params, optimizer_params, tra
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Towards Unified Models for Routing Problems")
     # env_params
-    parser.add_argument('--problem', type=str, default="TSPTW", choices=["CVRP", "TSPTW", "TSPDL", "VRPBLTW"])
+    parser.add_argument('--problem', type=str, default="TSPTW", choices=["CVRP", "TSPTW", "TSPDL", "VRPBLTW", "SOP"])
     parser.add_argument('--tw_type', type=str, default="da_silva", choices=["da_silva", "cappart", "zhang", "random"])
     parser.add_argument('--tw_duration', type=str, default="1020", choices=["1020", "75100", "2550", "5075", "random", "curriculum"])
     parser.add_argument('--dl_percent', type=int, default=90, help="percentage of nodes that DL < total demand")
@@ -198,19 +191,13 @@ if __name__ == "__main__":
     parser.add_argument('--logit_clipping', type=float, default=10)
     parser.add_argument('--ff_hidden_dim', type=int, default=512)
     parser.add_argument('--tw_normalize', type=bool, default=True)
-    parser.add_argument('--num_experts', type=int, default=4, help="the number of FFN in a MOE layer")
     parser.add_argument('--norm', type=str, default="instance", choices=["batch", "batch_no_track", "instance", "layer", "rezero", "none"])
-    parser.add_argument('--norm_loc', type=str, default="norm_last", choices=["norm_first", "norm_last"], help="whether conduct normalization before MHA/FFN/MOE")
-    parser.add_argument('--topk', type=int, default=2, help="how many experts (on average) to route for each input")
-    parser.add_argument('--expert_loc', type=int, nargs='+', default=[2, 4], help="where to use MOE")
-    parser.add_argument('--routing_level', type=str, default="problem", choices=["problem", "instance", "token"], help="routing level for MOE")
-    parser.add_argument('--routing_method', type=str, default="random", choices=["token_choice", "expert_choice", "soft_moe", "random"], help="only activate for instance-level and token-level routing")
+    parser.add_argument('--norm_loc', type=str, default="norm_last", choices=["norm_first", "norm_last"], help="whether conduct normalization before MHA/FFN")
+    parser.add_argument('--pairwise_merge', type=str, default="feature,attention", help='Comma-separated list of modes: feature,embedding,attention')
+    parser.add_argument('--which_feature', type=str, default="both", choices=["succ", "prec", "both"])
+    parser.add_argument('--succ_attention_bias', type=float, default=1.0)
     parser.add_argument('--dual_decoder', type=bool, default=False)
     parser.add_argument('--aspect_num', type=int, default=2, help="aspects of info, now includes features and positional info")
-    # LoRA
-    parser.add_argument('--use_LoRA', type=bool, default=False)
-    parser.add_argument('--LoRA_begin_step', type=int, default=1, help="count from 0")
-    parser.add_argument('--LoRA_rank', type=int, default=16)
 
     # optimizer_params
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -219,15 +206,7 @@ if __name__ == "__main__":
     parser.add_argument('--gamma', type=float, default=0.1, help='new_lr = lr * gamma')
     parser.add_argument('--dynamic_coefficient', type=bool, default=False)
     parser.add_argument('--uncertainty_weight', type=bool, default=False)
-
-    # polynet
-    parser.add_argument('--polynet', type=bool, default=False)
-    parser.add_argument('--train_z_sample_size', type=int, default=0)
-    parser.add_argument('--val_z_sample_size', type=int, default=0)
-    parser.add_argument('--z_dim', type=int, default=16)
-    parser.add_argument('--poly_embedding_dim', type=int, default=256)
     parser.add_argument("--amp_training", type=bool, default=True)
-    parser.add_argument('--use_fast_attention', type=bool, default=True)
 
     # trainer_params
     parser.add_argument('--epochs', type=int, default=5000, help="total training epochs")
@@ -366,7 +345,6 @@ if __name__ == "__main__":
     # note = "_CVRP_POMOstart_Soft_unifiedEnc6C3I_GroupBaseline_ImprTop2Qual_Impro5Val20_loss1v1"
     # note = "_CVRP_POMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop2Qual_Impro5Val20_new"
     # note = "_CVRP_randomInit_GroupBaseline_Impr2_Impro5Val20"
-    # note = "_CVRP100_POMOstart_Soft_unifiedEnc_GroupBaseline_ImprTop2Qual_Impro5Val20_LoRA32"
     # note = "TSPTW100_Hard_woTWmask_withPenalty_construction_only"
     # note = "_TSPTW50_rmPOMOstart_Soft_unifiedEncDec_withRNN_GroupBaseline_ImprTop5Qual_Impro5Val20"
     # note = "_TSPTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_ImprTop5Qual_Impro5Val20"
