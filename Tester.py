@@ -205,7 +205,7 @@ class Tester:
         self.model.eval()
         if self.model_params["load_safety_layer"]:
             self.safety_layer.eval()
-        with torch.no_grad():
+        with torch.inference_mode():
             normalize = False if (self.env_params["tw_type"] == "random" or self.env_params["tw_type"] is None) else True
             env.load_problems(batch_size, problems=test_data, aug_factor=aug_factor, normalize=normalize)
             reset_state, _, _ = env.reset()
@@ -229,7 +229,7 @@ class Tester:
             # print(use_sl_mask)
             # if self.model_params["double_head_decoder"] and self.lazy_model is not None and env.selected_count >= 1:
             #     # use when not training the SL lazy model
-            #     with torch.no_grad():
+            #     with torch.inference_mode():
             #         use_sl_mask = self.lazy_model(state, pomo=self.env_params["pomo_start"],
             #                                       candidate_feature=candidate_feature,
             #                                       feasible_start=feasible_start, use_sl_mask=False, no_select_prob=True,
