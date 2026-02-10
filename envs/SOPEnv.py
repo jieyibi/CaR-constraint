@@ -3,17 +3,17 @@ import torch
 import os, pickle
 import numpy as np
 from utils import *
+
 __all__ = ['SOPEnv']
-EPSILON_hardcoded = 0.1
+EPSILON_hardcoded = 0.1  # maximal 10% of the precedence constraint can be violated
+
 
 @dataclass
 class Reset_State:
     node_xy: torch.Tensor = None
     # shape: (batch, problem, 2)
-    precedence_matrix: torch.Tensor = None
+    precedence_matrix: torch.Tensor = None  # precedence[b, i, j] = -1 if i precedes j and i->j is infeasible
     # shape: (batch, problem, problem)
-    prob_emb: torch.Tensor = None
-    # shape: (num_training_prob)
 
 
 @dataclass
@@ -32,8 +32,6 @@ class Step_State:
     # shape: (batch, pomo)
     infeasible: torch.Tensor = None
     # shape: (batch, pomo)
-    load: torch.Tensor = None
-    # shape: (batch, pomo)
     length: torch.Tensor = None
     # shape: (batch, pomo)
     current_coord: torch.Tensor = None
@@ -50,15 +48,20 @@ class SOPEnv:
         self.problem_size = env_params['problem_size']
         self.pomo_size = env_params['pomo_size']
         self.loc_scaler = env_params['loc_scaler'] if 'loc_scaler' in env_params.keys() else None
+        # hardness control parameters
+        self.precedence_ratio = env_params['precedence_ratio']
+        self.geometric_conflict_ratio = env_params['geometric_conflict_ratio']
+        self.precedence_balance_ratio = env_params.get('precedence_balance_ratio', 0.0)  # 0.0: no balance, 1.0: full balance
 
         self.epsilon = EPSILON_hardcoded
         self.k_max = self.env_params['k_max'] if 'k_max' in env_params.keys() else None
         if 'pomo_start' in env_params.keys():
             self.pomo_size = env_params['pomo_size'] if env_params['pomo_start'] else env_params['train_z_sample_size']
 
-        self.device = torch.device('cuda', torch.cuda.current_device()) if 'device' not in env_params.keys() else env_params['device']
+        self.device = torch.device('cuda', torch.cuda.current_device()) if 'device' not in env_params.keys() else \
+        env_params['device']
 
-        # Const @Load_Problem
+        # Const
         ####################################
         self.batch_size = None
         self.BATCH_IDX = None
@@ -66,13 +69,9 @@ class SOPEnv:
         self.START_NODE = None
         # IDX.shape: (batch, pomo)
         self.node_xy = None
-        self.lib_node_xy = None
-        # if self.env_params['original_lib_xy'] is not None:
-        #     self.lib_node_xy  = self.env_params['original_lib_xy']
         # shape: (batch, problem, 2)
-        self.node_demand = None
-        self.node_draft_limit = None
-        # shape: (batch, problem)
+        self.precedence_matrix = None
+        # shape: (batch, problem, problem)
 
         # Dynamic-1
         ####################################
@@ -81,19 +80,13 @@ class SOPEnv:
         # shape: (batch, pomo)
         self.selected_node_list = None
         self.infeasibility_list = None
-        self.out_of_draft_limit_list = None
-        # shape: (batch, pomo, 0~)
+        self.wrong_precedence_list = None  # shape: (batch, pomo, 0~)
+        self.unvisited_precedence_node = None # shape: (batch, pomo, problem)
 
         # Dynamic-2
         ####################################
-        self.load = None
-        # shape: (batch, pomo)
         self.visited_ninf_flag = None
-        self.simulated_ninf_flag = None
-        self.global_mask = None
-        self.global_mask_ninf_flag = None
-        self.out_of_dl_ninf_flag = None
-        # shape: (batch, pomo, problem)
+        self.precedence_ninf_flag = None
         self.ninf_mask = None
         # shape: (batch, pomo, problem)
         self.finished = None
@@ -112,39 +105,34 @@ class SOPEnv:
     def load_problems(self, batch_size, rollout_size, problems=None, aug_factor=1, normalize=False):
         self.pomo_size = rollout_size
         if problems is not None:
-            node_xy, node_demand, node_draft_limit = problems
+            node_xy, precedence_matrix = problems
         else:
-            node_xy, node_demand, node_draft_limit = self.get_random_problems(batch_size, self.problem_size, normalized=normalize)
+            node_xy, precedence_matrix = self.get_random_problems(batch_size, self.problem_size, normalized=normalize)
         self.batch_size = node_xy.size(0)
 
         if aug_factor > 1:
             if aug_factor == 8:
                 self.batch_size = self.batch_size * 8
                 node_xy = self.augment_xy_data_by_8_fold(node_xy)
-                node_demand = node_demand.repeat(8, 1)
-                node_draft_limit = node_draft_limit.repeat(8, 1)
+                precedence_matrix = precedence_matrix.repeat(8, 1, 1)
             else:
                 raise NotImplementedError
         # print(node_xy.size())
         self.node_xy = node_xy
-        if self.lib_node_xy is not None:
-            self.lib_node_xy = self.lib_node_xy.repeat(8,1,1)
-            # shape: (8*batch, N, 2)
         # shape: (batch, problem, 2)
-        self.node_demand = node_demand
-        self.node_draft_limit = node_draft_limit
-        # shape: (batch, problem)
+        self.precedence_matrix = precedence_matrix
+        # shape: (batch, problem, problem)
 
         self.BATCH_IDX = torch.arange(self.batch_size)[:, None].expand(self.batch_size, self.pomo_size).to(self.device)
         self.POMO_IDX = torch.arange(self.pomo_size)[None, :].expand(self.batch_size, self.pomo_size).to(self.device)
 
         self.reset_state.node_xy = node_xy
-        self.reset_state.node_demand = node_demand
-        self.reset_state.node_draft_limit = node_draft_limit
+        self.reset_state.precedence_matrix = precedence_matrix
 
         self.step_state.BATCH_IDX = self.BATCH_IDX
         self.step_state.POMO_IDX = self.POMO_IDX
-        self.step_state.START_NODE = torch.arange(start=1, end=self.pomo_size+1)[None, :].expand(self.batch_size, -1).to(self.device)
+        self.step_state.START_NODE = torch.arange(start=1, end=self.pomo_size + 1)[None, :].expand(self.batch_size, -1).to(self.device)
+
         self.step_state.PROBLEM = self.problem
 
     def reset(self):
@@ -152,20 +140,19 @@ class SOPEnv:
         self.current_node = None
         # shape: (batch, pomo)
         self.selected_node_list = torch.zeros((self.batch_size, self.pomo_size, 0), dtype=torch.long).to(self.device)
-        self.out_of_draft_limit_list = torch.zeros((self.batch_size, self.pomo_size, 0)).to(self.device)
-        self.infeasibility_list = torch.zeros((self.batch_size, self.pomo_size, 0), dtype=torch.bool).to(self.device) # True for causing infeasibility
+        self.wrong_precedence_list = torch.zeros((self.batch_size, self.pomo_size, 1)).to(self.device)
+        self.unvisited_precedence_node = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size), dtype=torch.int).to(self.device)
+        self.infeasibility_list = torch.zeros((self.batch_size, self.pomo_size, 0), dtype=torch.bool).to(self.device)  # True for causing infeasibility
         # shape: (batch, pomo, 0~)
 
-        self.load = torch.zeros(size=(self.batch_size, self.pomo_size)).to(self.device)
-        # shape: (batch, pomo)
         self.visited_ninf_flag = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size)).to(self.device)
-        self.simulated_ninf_flag = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size)).to(self.device)
-        self.global_mask = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size)).to(self.device)
-        self.global_mask_ninf_flag = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size)).to(self.device)
-        self.out_of_dl_ninf_flag = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size)).to(self.device)
+        self.precedence_ninf_flag = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size)).to(self.device)
         # shape: (batch, pomo, problem)
         self.ninf_mask = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size)).to(self.device)
         # shape: (batch, pomo, problem)
+        # For SOP: mask the last node (end node) until all other nodes are visited
+        last_node_idx = self.problem_size - 1
+        self.ninf_mask[:, :, last_node_idx] = float('-inf')
         self.finished = torch.zeros(size=(self.batch_size, self.pomo_size), dtype=torch.bool).to(self.device)
         self.infeasible = torch.zeros(size=(self.batch_size, self.pomo_size), dtype=torch.bool).to(self.device)
         # shape: (batch, pomo)
@@ -180,7 +167,6 @@ class SOPEnv:
 
     def pre_step(self):
         self.step_state.selected_count = self.selected_count
-        self.step_state.load = self.load
         self.step_state.current_node = self.current_node
         self.step_state.ninf_mask = self.ninf_mask
         self.step_state.finished = self.finished
@@ -192,8 +178,8 @@ class SOPEnv:
         done = False
         return self.step_state, reward, done
 
-    def step(self, selected, visit_mask_only =True, out_reward = False, generate_PI_mask=False, use_predicted_PI_mask=False, pip_step=1,
-             soft_constrained = False, backhaul_mask = None, penalty_normalize=False):
+    def step(self, selected, visit_mask_only=True, out_reward=False, generate_PI_mask=False,
+             use_predicted_PI_mask=False, pip_step=1, soft_constrained=False, backhaul_mask=None, penalty_normalize=False):
         # selected.shape: (batch, pomo)
 
         # Dynamic-1
@@ -203,17 +189,6 @@ class SOPEnv:
         # shape: (batch, pomo)
         self.selected_node_list = torch.cat((self.selected_node_list, self.current_node[:, :, None]), dim=2)
         # shape: (batch, pomo, 0~)
-
-        # Dynamic-2
-        ####################################
-        demand_list = self.node_demand[:, None, :].expand(self.batch_size, self.pomo_size, -1)
-        # shape: (batch, pomo, problem)
-        gathering_index = selected[:, :, None]
-        # shape: (batch, pomo, 1)
-        selected_demand = demand_list.gather(dim=2, index=gathering_index).squeeze(dim=2)
-        # shape: (batch, pomo)
-        self.load += selected_demand
-
         current_coord = self.node_xy[torch.arange(self.batch_size)[:, None], selected]
         # shape: (batch, pomo, 2)
         new_length = (current_coord - self.current_coord).norm(p=2, dim=-1)
@@ -227,38 +202,41 @@ class SOPEnv:
         self.visited_ninf_flag[self.BATCH_IDX, self.POMO_IDX, selected] = float('-inf')
         # shape: (batch, pomo, problem)
 
-        # draft limit constraint
+        # precedence constraint
         round_error_epsilon = 0.00001
-        dl_list = self.node_draft_limit[:, None, :].expand(self.batch_size, self.pomo_size, -1)
+        self.precedence_ninf_flag = torch.zeros(size=(self.batch_size, self.pomo_size, self.problem_size)).to(self.device)
+        # 1. directly infeasible edges
+        precedence_expanded = self.precedence_matrix.unsqueeze(1).expand(-1, self.pomo_size, -1, -1)  # (batch, pomo, problem, problem)
+        predecessors_of_selected = precedence_expanded[self.BATCH_IDX, self.POMO_IDX, selected, :]
         # shape: (batch, pomo, problem)
+        self.precedence_ninf_flag[predecessors_of_selected == -1] = float('-inf')
+        # shape: (batch, pomo, problem) -> if precedence_matrix[current][next] == -1, it means: current cannot directly go to next (infeasible edge)
+        # 2. Mask out nodes whose predecessors are not yet visited
+        not_visited = (self.visited_ninf_flag != float('-inf'))  # (batch, pomo, problem)
+        # For each i, check if any predecessor j (except start node) (where precedence_matrix[i,j]==-1) is not visited
+        unvisited_predecessors = ((precedence_expanded == -1) & not_visited.unsqueeze(-2))[:,:,:,1:].any(dim=-1)  # (batch, pomo, problem)
+        self.precedence_ninf_flag = torch.where(unvisited_predecessors, float('-inf'), self.precedence_ninf_flag)
 
-        # simulate the right infsb mask and see ATTENTION!
-        if generate_PI_mask and self.selected_count < self.problem_size -1:
-            self._calculate_PIP_mask(pip_step)
-
-        # (current load + demand of next node > draft limit of next node) means infeasible
-        out_of_dl = self.load[:, :, None] + demand_list > dl_list + round_error_epsilon
-        # shape: (batch, pomo, problem)
-        self.out_of_dl_ninf_flag[out_of_dl] = float('-inf')
-        # shape: (batch, pomo, problem)
-        # value that exceeds draft limit of the selected node = current load - node_draft_limit
-        total_out_of_dl = self.load - self.node_draft_limit[torch.arange(self.batch_size)[:, None], selected]
-        # negative value means current load < node_draft_limit, turn it into 0
-        total_out_of_dl = torch.where(total_out_of_dl<0, torch.zeros_like(total_out_of_dl), total_out_of_dl)
-        # shape: (batch, pomo)
-        self.out_of_draft_limit_list = torch.cat((self.out_of_draft_limit_list, total_out_of_dl[:, :, None]), dim=2)
+        # Count precedence violations: number of unvisited predecessors of selected nodes
+        if self.selected_count > 1:
+            num_unvisited_predecessors = ((precedence_expanded == -1) & not_visited.unsqueeze(-2))[self.BATCH_IDX, self.POMO_IDX,selected,1:].sum(-1).float()  # (batch, pomo)
+            self.unvisited_precedence_node[self.BATCH_IDX, self.POMO_IDX, selected] = (num_unvisited_predecessors > round_error_epsilon).int()
+            self.wrong_precedence_list = torch.cat((self.wrong_precedence_list, num_unvisited_predecessors[:, :, None]), dim=2) # (batch, pomo, 0~)
 
         self.ninf_mask = self.visited_ninf_flag.clone()
         if not visit_mask_only or not soft_constrained:
-            self.ninf_mask[out_of_dl] = float('-inf')
-        if generate_PI_mask and self.selected_count < self.problem_size -1 and (not use_predicted_PI_mask):
-            self.ninf_mask = torch.where(self.simulated_ninf_flag==float('-inf'), float('-inf'), self.ninf_mask)
-            all_infsb = ((self.ninf_mask==float('-inf')).all(dim=-1)).unsqueeze(-1).expand(-1,-1,self.problem_size)
-            self.ninf_mask = torch.where(all_infsb, self.visited_ninf_flag, self.ninf_mask)
+            self.ninf_mask = torch.min(self.ninf_mask, self.precedence_ninf_flag)
 
-        # visited == 0 means not visited
-        # out_of_dl_ninf_flag == -inf means already can not be visited bacause current_load + node_demand > node_draft_limit
-        newly_infeasible = (((self.visited_ninf_flag == 0).int() + (self.out_of_dl_ninf_flag == float('-inf')).int()) == 2).any(dim=2)
+        # For SOP: mask the last node until all other nodes (0 to problem_size-2) are visited
+        last_node_idx = self.problem_size - 1
+        # Check if all nodes except the last one are visited
+        # visited_ninf_flag == -inf means visited, so we check if all except last are -inf
+        all_others_visited = (self.visited_ninf_flag[:, :, :last_node_idx] == float('-inf')).all(dim=-1)  # (batch, pomo)
+        # Only unmask last node if all other nodes are visited
+        self.ninf_mask[:, :, last_node_idx] = torch.where(all_others_visited, self.visited_ninf_flag[:, :, last_node_idx], float('-inf'))
+
+        # Check if the route is infeasible: precedence violation
+        newly_infeasible = (num_unvisited_predecessors > round_error_epsilon) if self.selected_count > 1 else False
         self.infeasible = self.infeasible + newly_infeasible
         # once the infeasibility occurs, no matter which node is selected next, the route has already become infeasible
         self.infeasibility_list = torch.cat((self.infeasibility_list, self.infeasible[:, :, None]), dim=2)
@@ -276,7 +254,6 @@ class SOPEnv:
         self.step_state.ninf_mask = self.ninf_mask
         self.step_state.finished = self.finished
         self.step_state.infeasible = self.infeasible
-        self.step_state.load = self.load
         self.step_state.length = self.length
         self.step_state.current_coord = self.current_coord
 
@@ -288,9 +265,9 @@ class SOPEnv:
             else:
                 # shape: (batch, pomo)
                 dist_reward = -self._get_travel_distance()  # note the minus sign
-                total_out_of_dl_reward = - self.out_of_draft_limit_list.sum(dim=-1)
-                out_of_dl_nodes_reward = - torch.where(self.out_of_draft_limit_list > round_error_epsilon, torch.ones_like(self.out_of_draft_limit_list), self.out_of_draft_limit_list).sum(-1).int()
-                reward = [dist_reward, total_out_of_dl_reward, out_of_dl_nodes_reward]
+                total_wrong_precedence_reward = - self.wrong_precedence_list.sum(dim=-1)
+                wrong_precedence_nodes_reward = - self.unvisited_precedence_node.sum(-1).int()
+                reward = [dist_reward, total_wrong_precedence_reward, wrong_precedence_nodes_reward]
                 # not visited but can not reach
                 # infeasible_rate = self.infeasible.sum() / (self.batch_size*self.pomo_size)
             infeasible = self.infeasible
@@ -303,18 +280,18 @@ class SOPEnv:
     def _get_travel_distance(self):
         gathering_index = self.selected_node_list[:, :, :, None].expand(-1, -1, -1, 2)
         # shape: (batch, pomo, selected_list_length, 2)
-        if self.lib_node_xy is not None:
-            all_xy = self.lib_node_xy[:, None, :, :].expand(-1, self.pomo_size, -1, -1)
-        else:
-            all_xy = self.node_xy[:, None, :, :].expand(-1, self.pomo_size, -1, -1)
+        all_xy = self.node_xy[:, None, :, :].expand(-1, self.pomo_size, -1, -1)
         # shape: (batch, pomo, problem+1, 2)
 
         ordered_seq = all_xy.gather(dim=2, index=gathering_index)
         # shape: (batch, pomo, selected_list_length, 2)
 
         rolled_seq = ordered_seq.roll(dims=2, shifts=-1)
-        segment_lengths = ((ordered_seq-rolled_seq)**2).sum(3).sqrt()
+        segment_lengths = ((ordered_seq - rolled_seq) ** 2).sum(3).sqrt()
         # shape: (batch, pomo, selected_list_length)
+        # For non-cyclic path, exclude the last segment (no return to start)
+        segment_lengths = segment_lengths[:, :, :-1]
+        # shape: (batch, pomo, selected_list_length - 1)
 
         if self.loc_scaler:
             segment_lengths = torch.round(segment_lengths * self.loc_scaler) / self.loc_scaler
@@ -331,46 +308,187 @@ class SOPEnv:
             os.makedirs(filedir)
         with open(path, 'wb') as f:
             pickle.dump(list(zip(*dataset)), f, pickle.HIGHEST_PROTOCOL)
-        print("Save TSPDL dataset to {}".format(path))
+        print("Save SOP dataset to {}".format(path))
 
     def load_dataset(self, path, offset=0, num_samples=1000, disable_print=True):
         assert os.path.splitext(path)[1] == ".pkl", "Unsupported file type (.pkl needed)."
         with open(path, 'rb') as f:
-            data = pickle.load(f)[offset: offset+num_samples]
+            data = pickle.load(f)[offset: offset + num_samples]
             if not disable_print:
                 print(">> Load {} data ({}) from {}".format(len(data), type(data), path))
-        node_xy, node_demand, node_draft_limit = [i[0] for i in data], [i[1] for i in data], [i[2] for i in data]
-        node_xy, node_demand, node_draft_limit = torch.Tensor(node_xy), torch.Tensor(node_demand), torch.Tensor(node_draft_limit)
-        # scale it to [0,1]
-        demand_sum = node_demand.sum(-1).view(-1, 1)
-        node_demand = node_demand / demand_sum
-        node_draft_limit = node_draft_limit / demand_sum
-        data = (node_xy, node_demand, node_draft_limit)
+        node_xy, precedence_matrix = [i[0] for i in data], [i[1] for i in data]
+        node_xy, precedence_matrix = torch.Tensor(node_xy), torch.Tensor(precedence_matrix)
+        data = (node_xy, precedence_matrix)
         return data
 
     def get_random_problems(self, batch_size, problem_size, normalized=True):
-        dl_percent =self.dl_percent
-        node_xy = torch.rand(size=(batch_size, problem_size, 2))  # (batch, problem, 2)
-        node_demand = torch.cat([torch.zeros((batch_size, 1)), torch.ones((batch_size, problem_size - 1))], dim=1)
-        # (batch, problem) 0,1,1,1,1,....
-        demand_sum = node_demand.sum(dim=1).unsqueeze(1)
-        # currently, demand_sum == problem_size-1; if not, the program needs to be revised (todo)
-        node_draft_limit = torch.ones((batch_size, problem_size)) * demand_sum
-        for i in range(batch_size):
-            # randomly choose half of the nodes (except depot) to lower their draft limit (range: [1, demand_sum))
-            lower_dl_idx = np.random.choice(range(1, problem_size), size=problem_size * dl_percent // 100, replace=False)
-            feasible_dl = False
-            while not feasible_dl:
-                lower_dl = torch.randint(1, demand_sum[i].int().item(), size=(problem_size * dl_percent // 100,))
-                cnt = torch.bincount(lower_dl)
-                cnt_cumsum = torch.cumsum(cnt, dim=0)
-                feasible_dl = (cnt_cumsum <= torch.arange(0, cnt.size(0))).all()
-            node_draft_limit[i, lower_dl_idx] = lower_dl.float()
-        if normalized:
-            node_demand = node_demand / demand_sum
-            node_draft_limit = node_draft_limit / demand_sum
+        precedence_ratio = self.precedence_ratio
+        geometric_conflict_ratio = self.geometric_conflict_ratio
+        precedence_balance_ratio = self.precedence_balance_ratio
 
-        return node_xy, node_demand, node_draft_limit
+        # SOP rules:
+        # - Node 0 (index 0) is the start node, does not participate in precedence constraints
+        # - Node problem_size-1 (last node) is the end node, all outgoing edges are -1 (forbidden)
+        # - Other nodes (1 to problem_size-2) can participate in precedence constraints
+
+        # 1. Generate node coordinates
+        node_xy = torch.rand(size=(batch_size, problem_size, 2))  # (batch, problem, 2)
+
+        # 2. Generate precedence constraints (guaranteed feasible by construction)
+        # if precedence_matrix[i][j] == -1, it means:
+        #   - i cannot directly go to j (infeasible edge)
+        #   - j must precede i (precedence constraint)!!!
+        precedence_matrix = torch.zeros(size=(batch_size, problem_size, problem_size), dtype=torch.float32).to(node_xy.device)
+
+        # 3. Generate random topological orders for all batches, then add precedence constraints
+        # This guarantees acyclicity and feasibility
+        # Shape: (batch_size, problem_size)
+        # For middle nodes (1 to problem_size-2), generate random order
+        if problem_size > 2:
+            random_vals = torch.rand(batch_size, problem_size - 2)
+            middle_order = torch.argsort(random_vals, dim=1) + 1  # +1 because we skip node 0
+            topo_orders = torch.cat([
+                torch.zeros(batch_size, 1, dtype=torch.long),  # Node 0 is always first
+                middle_order,
+                torch.full((batch_size, 1), problem_size - 1, dtype=torch.long)  # Last node is always last
+            ], dim=1)
+        else:
+            # problem_size <= 2: only start and end nodes
+            topo_orders = torch.tensor([[0, problem_size - 1]], dtype=torch.long).expand(batch_size, -1).to(node_xy.device)
+
+        # 4. Sample precedence constraints based on topological order
+        # Only allow precedence from earlier nodes to later nodes in topo_order
+        # Exclude:
+        #   - Node 0 (start) cannot have precedence constraints (it's always first)
+        #   - Last node cannot have precedence constraints (it's always last)
+        #   - Adjacent pairs in topo_order (pos_j - pos_i > 1)
+        # Maximum valid pairs: (n-3) + ... + 1 = (n-3+1)(n-3)/2 for middle nodes
+        if problem_size > 2:
+            max_valid_pairs = (problem_size - 2) * (problem_size - 3) // 2
+            num_constraints = int(precedence_ratio * max_valid_pairs)
+
+            if num_constraints > 0:
+                # Create position mapping for all batches
+                # pos[b, i] = position of node i in topo_order for batch b
+                pos = torch.zeros(batch_size, problem_size, dtype=torch.long)
+                batch_indices = torch.arange(batch_size).unsqueeze(1).expand(-1, problem_size)
+                pos[batch_indices, topo_orders] = torch.arange(problem_size).unsqueeze(0).expand(batch_size, -1)
+                i_indices, j_indices = torch.meshgrid(
+                    torch.arange(problem_size, dtype=torch.long), 
+                    torch.arange(problem_size, dtype=torch.long), 
+                    indexing='ij'
+                )
+                pos_i = pos[:, i_indices]  # pos[b, i] for all i
+                pos_j = pos[:, j_indices]  # pos[b, j] for all j
+
+                # Filter: valid pairs for precedence constraints
+                valid_mask = (
+                        (pos_j < pos_i) & # if j < i (j precedes i), i->j infeasible
+                        (i_indices.unsqueeze(0) != j_indices.unsqueeze(0)) & # i != j （no self-loop）
+                        (i_indices.unsqueeze(0) != 0) &  # i is not start node
+                        (j_indices.unsqueeze(0) != 0) &  # j is not start node
+                        (i_indices.unsqueeze(0) != problem_size - 1) &  # i is not end node
+                        (j_indices.unsqueeze(0) != problem_size - 1)  # j is not end node
+                )
+
+                # Apply geometric conflict ratio: increase difficulty by making precedence constraints conflict with geometric proximity
+                if geometric_conflict_ratio > 0:
+                    # For each valid pair (i, j), compute geometric distance
+                    # Higher geometric_conflict_ratio means we prefer pairs that are geometrically far
+                    # This creates conflict between precedence and geometry
+                    distance_matrix = torch.sqrt(torch.sum((node_xy.unsqueeze(2) - node_xy.unsqueeze(1)) ** 2, dim=-1))
+                    geometric_distances = distance_matrix[:, i_indices, j_indices]  # (batch, problem, problem)
+                    # Normalize distances to [0, 1] range for each batch
+                    max_dist = geometric_distances.max(dim=-1, keepdim=True)[0].max(dim=-2, keepdim=True)[0]
+                    min_dist = geometric_distances.min(dim=-1, keepdim=True)[0].min(dim=-2, keepdim=True)[0]
+                    normalized_dist = (geometric_distances - min_dist) / (max_dist - min_dist + 1e-8)
+                    # Higher distance = higher score (we want to select far pairs)
+                    conflict_scores = normalized_dist * geometric_conflict_ratio
+                else:
+                    conflict_scores = torch.zeros_like(valid_mask.float())
+
+                random_probs = torch.rand(batch_size, problem_size, problem_size, device=valid_mask.device)
+                
+                if precedence_balance_ratio == 0:
+                    selection_scores = (random_probs * (1.0 - geometric_conflict_ratio) + conflict_scores * geometric_conflict_ratio)
+                    selection_scores = torch.where(valid_mask, selection_scores, torch.tensor(float('-inf'), device=selection_scores.device))
+                    
+                    flat_scores = selection_scores.view(batch_size, -1)
+                    _, topk_indices = torch.topk(flat_scores, k=num_constraints, dim=1)
+                    
+                    batch_idx = torch.arange(batch_size, device=topk_indices.device).unsqueeze(1).expand(-1, topk_indices.size(1))
+                    flat_indices = topk_indices.flatten()
+                    batch_flat = batch_idx.flatten()
+                    
+                    selected_i_flat = (flat_indices // problem_size).long()
+                    selected_j_flat = (flat_indices % problem_size).long()
+                    
+                    valid_selections = valid_mask[batch_flat, selected_i_flat, selected_j_flat]
+                    selected_i = selected_i_flat[valid_selections]
+                    selected_j = selected_j_flat[valid_selections]
+                    selected_batch = batch_flat[valid_selections]
+                    
+                    if len(selected_i) > 0:
+                        precedence_matrix[selected_batch, selected_i, selected_j] = -1.0
+                else:
+                    node_i_selected_count = torch.zeros(batch_size, problem_size, device=valid_mask.device)
+                    node_j_selected_count = torch.zeros(batch_size, problem_size, device=valid_mask.device)
+                    remaining_valid_mask = valid_mask.clone()
+                    batch_selected_count = torch.zeros(batch_size, dtype=torch.long, device=valid_mask.device)
+                    
+                    for _ in range(num_constraints):
+                        max_i_count = node_i_selected_count.max(dim=-1, keepdim=True)[0]
+                        min_i_count = node_i_selected_count.min(dim=-1, keepdim=True)[0]
+                        max_j_count = node_j_selected_count.max(dim=-1, keepdim=True)[0]
+                        min_j_count = node_j_selected_count.min(dim=-1, keepdim=True)[0]
+                        i_range = max_i_count - min_i_count
+                        j_range = max_j_count - min_j_count
+                        
+                        if precedence_balance_ratio >= 1.0:
+                            balance_i_prob = 1.0 - (node_i_selected_count - min_i_count) / (i_range + 1e-8)
+                            balance_j_prob = 1.0 - (node_j_selected_count - min_j_count) / (j_range + 1e-8)
+                        else:
+                            balance_i_prob = (node_i_selected_count - min_i_count) / (i_range + 1e-8) 
+                            balance_j_prob = (node_j_selected_count - min_j_count) / (j_range + 1e-8) 
+                        
+                        normalized_i_balance = torch.where(i_range > 1e-8, balance_i_prob, torch.ones_like(node_i_selected_count))
+                        normalized_j_balance = torch.where(j_range > 1e-8, balance_j_prob, torch.ones_like(node_j_selected_count))
+                        balance_scores = (2 * normalized_i_balance.unsqueeze(-1) + normalized_j_balance.unsqueeze(-2)) / 3.0
+                        
+                        if geometric_conflict_ratio > 0:
+                            combined_scores = (balance_scores * (1.0 - geometric_conflict_ratio) + conflict_scores * geometric_conflict_ratio) + random_probs * 0.01
+                        else:
+                            combined_scores = balance_scores + random_probs * 0.01
+                        
+                        combined_scores = torch.where(remaining_valid_mask, combined_scores, torch.tensor(float('-inf'), device=combined_scores.device))
+                        
+                        flat_scores = combined_scores.view(batch_size, -1)
+                        _, top_indices = torch.topk(flat_scores, k=1, dim=1)
+                        
+                        batch_mask = batch_selected_count < num_constraints
+                        if batch_mask.any():
+                            flat_indices = top_indices[batch_mask, 0]
+                            selected_i = (flat_indices // problem_size).long()
+                            selected_j = (flat_indices % problem_size).long()
+                            batch_idx = torch.arange(batch_size, device=valid_mask.device)[batch_mask]
+                            
+                            valid_selections = remaining_valid_mask[batch_idx, selected_i, selected_j]
+                            if valid_selections.any():
+                                valid_batch = batch_idx[valid_selections]
+                                valid_i = selected_i[valid_selections]
+                                valid_j = selected_j[valid_selections]
+                                
+                                precedence_matrix[valid_batch, valid_i, valid_j] = -1.0
+                                node_i_selected_count[valid_batch, valid_i] += 1
+                                node_j_selected_count[valid_batch, valid_j] += 1
+                                batch_selected_count[valid_batch] += 1
+                                remaining_valid_mask[valid_batch, valid_i, valid_j] = False
+
+        # mask the start nodes' incoming edges and the end nodes' outgoing edges
+        precedence_matrix[:, 1:, 0] = -1.0
+        precedence_matrix[:, problem_size - 1, :-1] = -1.0
+
+        return node_xy, precedence_matrix
 
     def augment_xy_data_by_8_fold(self, xy_data):
         # xy_data.shape: (batch, N, 2)
@@ -393,63 +511,13 @@ class SOPEnv:
 
         return aug_xy_data
 
-    def _calculate_PIP_mask(self, pip_step):
-        '''
-        copy from https://github.com/jieyibi/PIP-constraint/blob/main/POMO%2BPIP/envs/TSPTWEnv.py [NeurIPS'24]
-        '''
-        round_error_epsilon = 0.00001
-        demand_list = self.node_demand[:, None, :].expand(self.batch_size, self.pomo_size, -1) # shape: (batch, pomo, problem)
-        dl_list = self.node_draft_limit[:, None, :].expand(self.batch_size, self.pomo_size, -1) # shape: (batch, pomo, problem)
-
-        if pip_step == 0:
-            out_of_dl = self.load[:, :, None] + demand_list > dl_list + round_error_epsilon
-            self.simulated_ninf_flag = torch.zeros((self.batch_size, self.pomo_size, self.problem_size)) # shape: (batch, pomo, problem)
-            self.simulated_ninf_flag[out_of_dl] = float('-inf')
-        elif pip_step == 1:
-            unvisited = torch.masked_select(
-                torch.arange(self.problem_size).unsqueeze(0).unsqueeze(0).expand(self.batch_size, self.pomo_size, self.problem_size),
-                self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
-            two_step_unvisited = unvisited.unsqueeze(2).repeat(1, 1, self.problem_size - self.selected_count, 1)
-            diag_element = torch.diag_embed(torch.diagonal(two_step_unvisited, dim1=-2, dim2=-1))
-            two_step_idx = torch.masked_select(two_step_unvisited, diag_element == 0).reshape(self.batch_size, self.pomo_size, self.problem_size - self.selected_count,-1)
-
-            two_step_dl = torch.masked_select(dl_list, self.visited_ninf_flag != float('-inf')).reshape(self.batch_size, self.pomo_size, -1)
-            two_step_dl = two_step_dl.unsqueeze(2).repeat(1, 1, self.problem_size - self.selected_count, 1)
-            two_step_dl = torch.masked_select(two_step_dl, diag_element == 0).reshape(self.batch_size, self.pomo_size, self.problem_size - self.selected_count, -1)
-
-            current_load = self.load.unsqueeze(-1).repeat(1, 1, self.problem_size - self.selected_count)
-            # add demand of the first-step nodes
-            first_step_demand = torch.masked_select(demand_list, self.visited_ninf_flag != float('-inf')).reshape(
-                self.batch_size, self.pomo_size, -1)
-            current_load += first_step_demand
-            current_load = current_load.unsqueeze(-1).repeat(1, 1, 1, two_step_dl.size(-1))
-            # add demand of the second-step nodes
-            second_step_demand = first_step_demand.unsqueeze(2).repeat(1, 1, self.problem_size - self.selected_count, 1)
-            second_step_demand = torch.masked_select(second_step_demand, diag_element == 0).reshape(self.batch_size, self.pomo_size, self.problem_size - self.selected_count,-1)
-            current_load += second_step_demand
-
-            # feasibility judgement
-            infeasible_mark = (current_load > two_step_dl + round_error_epsilon)
-            selectable = (infeasible_mark == False).all(dim=-1)
-            self.global_mask = infeasible_mark.sum(-1) / infeasible_mark.size(-1)
-            self.global_mask_ninf_flag = torch.full((self.batch_size, self.pomo_size, self.problem_size), float('-inf'))
-            self.global_mask_ninf_flag.masked_scatter_(self.visited_ninf_flag == 0, self.global_mask)
-
-            self.simulated_ninf_flag = torch.full((self.batch_size, self.pomo_size, self.problem_size), float('-inf'))
-            selected_indices = selectable.nonzero(as_tuple=False)
-            unvisited_indices = unvisited[selected_indices[:, 0], selected_indices[:, 1], selected_indices[:, 2]]
-            self.simulated_ninf_flag[selected_indices[:, 0], selected_indices[:, 1], unvisited_indices] = 0.
-        else:
-            raise NotImplementedError
-
-
     def get_initial_solutions(self, strategy, k, max_dummy_size=0):
         batch_size, problem_size, _ = self.node_xy.size()
-        if strategy == "random": # not guarantee feasibility (may exceed tw)
+        if strategy == "random":  # not guarantee feasibility (may exceed tw)
             # start from 0
             B_k = batch_size * k
             # # random solution permutation
-            customer = torch.rand(B_k, problem_size-1).argsort(dim=1) + 1
+            customer = torch.rand(B_k, problem_size - 1).argsort(dim=1) + 1
             solutions = torch.cat([torch.zeros((B_k, 1), dtype=torch.long), customer], dim=1)
             # judge feasibility
             context = self.preprocessing(sol2rec(solutions.unsqueeze(1)).squeeze(1))
@@ -469,33 +537,42 @@ class SOPEnv:
         k = batch_size // self.node_xy.size(0)
         arange = torch.arange(batch_size)
 
-        pre = torch.zeros(batch_size).long()
-        visited_time = torch.zeros((batch_size, seq_length)).long()
-        current_load = torch.zeros((batch_size, ))
-        after_load = torch.zeros((batch_size, seq_length))
-        last_load = torch.zeros((batch_size, seq_length))
-        node_demand = self.node_demand.repeat_interleave(k, 0)
-        node_draft_limit = self.node_draft_limit.repeat_interleave(k, 0)
+        pre = torch.zeros(batch_size, dtype=torch.long, device=rec.device)
+        visited_time = torch.zeros((batch_size, seq_length), dtype=torch.long, device=rec.device)
+        current_violation = torch.zeros((batch_size,), device=rec.device)  # Cumulative violation count
+        after_violation = torch.zeros((batch_size, seq_length), device=rec.device)  # Violation after visiting node
+        violation = torch.zeros((batch_size, seq_length), device=rec.device)  # Violation at the time of visit
+        precedence_matrix = self.precedence_matrix.repeat_interleave(k, 0)  # (batch*k, problem, problem)
+        visited_mask = torch.zeros(batch_size, seq_length, dtype=torch.bool, device=rec.device)
+        
         for i in range(seq_length):
             next_ = rec[arange, pre]
             visited_time[arange, next_] = (i + 1) % seq_length
-            last_load[arange, next_] = current_load.clone()
-            current_load = current_load + node_demand[arange, next_]
-            after_load[arange, next_] = current_load.clone()
+            # For each batch, check which predecessors of next_ are not yet visited
+            # precedence_matrix[b, next_] == -1.0 means those nodes must precede next_
+            predecessors_mask = (precedence_matrix[arange, next_] == -1.0)  # (batch, problem)
+            unvisited_predecessors = predecessors_mask & (~visited_mask[arange, :])  # (batch, problem)
+            new_violations = unvisited_predecessors[:, 1:].sum(dim=-1).float()  # (batch,)
+            violation[arange, next_] = new_violations.clone()
+            current_violation = current_violation + new_violations
+            after_violation[arange, next_] = current_violation.clone()
+            visited_mask[arange, next_] = True
             pre = next_.clone()
-       # shape: (batch*k, problem_size)
-        last_load[:, 0] = 0.
-        after_load[:, 0] = 0.
-        # check by: self.timestamps.squeeze(1) == arrival_time.sort()[0]
+        
+        # Start node (node 0) has no violations
+        violation[:, 0] = 0.
+        after_violation[:, 0] = 0.
 
-        return (visited_time, after_load, last_load, node_demand, node_draft_limit)
+        return (visited_time, after_violation, violation, precedence_matrix)
 
     def check_feasibility(self, select_idx=None):
         raise NotImplementedError  # TODO: implement
         # assert (self.visited_ninf_flag == float('-inf')).all(), "not visiting all nodes!"
         # assert torch.gather(~self.infeasible, 1, select_idx).all(), "not valid tour!"
 
-    def get_costs(self, rec, get_context=False, check_full_feasibility=False, out_reward=False, penalty_factor=1.0, penalty_normalize=False, seperate_obj_penalty=False, non_linear=None, wo_node_penalty=False, wo_tour_penalty =False):
+    def get_costs(self, rec, get_context=False, check_full_feasibility=False, out_reward=False, penalty_factor=1.0,
+                  penalty_normalize=False, seperate_obj_penalty=False, non_linear=None, wo_node_penalty=False,
+                  wo_tour_penalty=False):
 
         k = rec.size(0) // self.node_xy.size(0)
         # check full feasibility if needed
@@ -506,15 +583,15 @@ class SOPEnv:
 
         coor = self.node_xy.repeat_interleave(k, 0)
         coor_next = coor.gather(1, rec.long().unsqueeze(-1).expand(*rec.size(), 2))
-        cost = (coor - coor_next).norm(p=2, dim=2).sum(1)
+        cost = (coor - coor_next).norm(p=2, dim=2)[:, :-1].sum(1) # is path not loop
 
-        # visited_time, after_load, last_load, node_demand, node_draft_limit
-        # after_load - dl
-        exceed_dl = torch.clamp_min(context[1] - context[-1], 0.0)
-        out_node_penalty = (exceed_dl > 1e-5).sum(-1)
-        out_penalty = exceed_dl.sum(-1)
+        # context: (visited_time, after_violation, last_violation, precedence_matrix)
+        after_violation, violation = context[1], context[2]  # (batch, seq_length)
+        out_node_penalty = (violation > 0).sum(-1)  # Number of nodes with violations
+        out_penalty = after_violation.max(dim=-1)[0]  # (batch,)  # Total violation count
         if penalty_normalize:
-            out_penalty = out_penalty / context[-1][:, 0]
+            # Normalize by problem size
+            out_penalty = out_penalty / rec.size(1)
         if out_reward:
             if wo_node_penalty:
                 cost = cost + penalty_factor * (out_penalty)
@@ -529,36 +606,39 @@ class SOPEnv:
         else:
             return cost, out_penalty.unsqueeze(0), out_node_penalty.unsqueeze(0)
 
+    def get_dynamic_feature(self, context, with_infsb_feature, tw_normalize=False, feature=None):
+        visited_time, after_violation, violation, precedence_matrix = context
 
-    def get_dynamic_feature(self, context, with_infsb_feature, tw_normalize=False):
-        visited_time, after_load, last_load, node_demand, node_draft_limit = context
-
-        batch_size, seq_length = after_load.size()
+        batch_size, seq_length = after_violation.size()
         k = batch_size // self.node_xy.size(0)
-        is_depot = torch.tensor([1.]+[0.]*(seq_length-1))[None,:].repeat_interleave(batch_size,0)
-        exceed_dl = torch.clamp_min(after_load - node_draft_limit, 0.0)
-        infeasibility_indicator_after_visit = exceed_dl > 0
-
+        device = after_violation.device
+        is_start_node= torch.zeros(batch_size, seq_length, device=device)
+        is_start_node[:, 0] = 1.0
+        is_end_node= torch.zeros(batch_size, seq_length, device=device)
+        is_end_node[:, -1] = 1.0
+        infeasibility_indicator_after_visit = violation > 0  # (batch, seq_length)
+        
+        # Dynamic features for each node at the time of visit
+        # violation already contains unvisited predecessors count (computed in preprocessing)
         to_actor = torch.cat((
-            after_load.unsqueeze(-1),
-            exceed_dl.unsqueeze(-1),
-            is_depot.unsqueeze(-1),
-            last_load.unsqueeze(-1),
-            # tw_start.unsqueeze(-1),
-            infeasibility_indicator_after_visit.unsqueeze(-1),
-        ), -1)  # the node features
-
-        feature = torch.cat([self.node_xy.repeat_interleave(k, 0), node_demand.unsqueeze(-1), node_draft_limit.unsqueeze(-1)], dim=-1)
+            after_violation.unsqueeze(-1),                    # Total violation after visiting node
+            violation.unsqueeze(-1),                         # Violation when visiting node (unvisited predecessors count)
+            is_start_node.unsqueeze(-1),                     # Whether node is the start node
+            is_end_node.unsqueeze(-1),                      # Whether node is the end node
+            infeasibility_indicator_after_visit.unsqueeze(-1).float(),  # Infeasibility indicator
+        ), -1)  # (batch, seq_length, 5)
         supplement_feature = to_actor
         if not with_infsb_feature:
             supplement_feature = to_actor[:, :, :-1]
-        feature = torch.cat((feature, supplement_feature), dim=-1)
+        node_feature = torch.cat((feature.repeat_interleave(k, 0), supplement_feature), dim=-1)
 
-        return visited_time, None, feature
+        return visited_time, None, node_feature
 
-    def improvement_step(self, rec, action, obj, feasible_history, t, weights=0, out_reward = False, penalty_factor=1., penalty_normalize=False, improvement_method = "kopt", insert_before=True, epsilon=EPSILON_hardcoded, seperate_obj_penalty=False, non_linear=None, n2s_decoder=False):
+    def improvement_step(self, rec, action, obj, feasible_history, t, weights=0, out_reward=False, penalty_factor=1.,
+                         penalty_normalize=False, improvement_method="kopt", insert_before=True,
+                         epsilon=EPSILON_hardcoded, seperate_obj_penalty=False, non_linear=None, n2s_decoder=False):
 
-        _, total_history = feasible_history.size()
+        total_history = feasible_history.size(1)
         pre_bsf = obj[:, 1:].clone()  # batch_size, 3 (current, bsf, tsp_bsf)
         feasible_history = feasible_history.clone()  # bs, total_history
 
@@ -569,12 +649,15 @@ class SOPEnv:
             next_state = self.rm_n_insert(rec, action, insert_before=insert_before)
         else:
             raise NotImplementedError()
-        next_obj, context, out_penalty, out_node_penalty = self.get_costs(next_state, get_context=True, out_reward=out_reward, penalty_factor=penalty_factor, penalty_normalize=penalty_normalize)
+        next_obj, context, out_penalty, out_node_penalty = self.get_costs(next_state, get_context=True,
+                                                                          out_reward=out_reward,
+                                                                          penalty_factor=penalty_factor,
+                                                                          penalty_normalize=penalty_normalize)
 
         # MDP step
-        non_feasible_cost_total = torch.clamp_min(context[1] - context[-1], 0.0).sum(-1)
+        non_feasible_cost_total = out_penalty[0]
         feasible = non_feasible_cost_total <= 0.0
-        soft_infeasible = (non_feasible_cost_total <= epsilon) & (non_feasible_cost_total > 0.)
+        soft_infeasible = (non_feasible_cost_total <= self.problem_size * EPSILON_hardcoded) & (non_feasible_cost_total > 0.)
 
         now_obj = pre_bsf.clone()
         if not out_reward:
@@ -584,7 +667,7 @@ class SOPEnv:
             # update all obj, obj = cost + penalty
             if non_linear is None:
                 now_obj[:, 0] = next_obj.clone()
-            elif non_linear in ["fixed_epsilon", "decayed_epsilon"]: # only have reward when penalty <= epsilon
+            elif non_linear in ["fixed_epsilon", "decayed_epsilon"]:  # only have reward when penalty <= epsilon
                 now_obj[soft_infeasible, 0] = next_obj[soft_infeasible].clone()
             else:
                 raise NotImplementedError
@@ -594,19 +677,21 @@ class SOPEnv:
         rewards = (pre_bsf - now_bsf)  # bs,2 (feasible_reward, epsilon-feasible_reward)
 
         # feasible history step
-        if n2s_decoder: # calculate the removal record
+        if n2s_decoder:  # calculate the removal record
             # todo: not carefully check yet but probably correct
             info, reg = None, torch.zeros((action.size(0), 1))
             assert not self.env_params["with_regular"], "n2s decoder does not support regularization reward."
             feasible_history[:, 1:] = feasible_history[:, :total_history - 1].clone()
-            action_removal= torch.zeros_like(feasible_history[:,0])
+            action_removal = torch.zeros_like(feasible_history[:, 0])
             action_removal[torch.arange(action.size(0)).unsqueeze(1), action[:, :1]] = 1.
             feasible_history[:, 0] = action_removal.clone()
             context2 = torch.cat(
-            (
-                feasible_history, # last three removal
-                feasible_history.mean(1, keepdims=True) if t > (total_history-2) else feasible_history[:,:(t+1)].mean(1, keepdims=True), # note: slightly different from N2S due to shorter improvement steps; before/after?
-            ),1 )  # (batch_size, 4, solution_size)
+                (
+                    feasible_history,  # last three removal
+                    feasible_history.mean(1, keepdims=True) if t > (total_history - 2) 
+                    else feasible_history[:,:(t + 1)].mean(1,keepdims=True),
+                # note: slightly different from N2S due to shorter improvement steps; before/after?
+                ), 1)  # (batch_size, 4, solution_size)
         else:
             feasible_history[:, 1:] = feasible_history[:, :total_history - 1].clone()
             feasible_history[:, 0] = feasible.clone()
@@ -660,21 +745,30 @@ class SOPEnv:
         return out
 
     def k_opt(self, rec, action):
-
         _, dummy_graph_size = rec.size()
+        start_node, end_node = 0, self.problem_size - 1
 
         # action bs * (K_index, K_from, K_to)
         selected_index = action[:, :self.k_max]
         left = action[:, self.k_max:2 * self.k_max]
         right = action[:, 2 * self.k_max:]
 
+        # Filter out edges involving start or end nodes
+        # Cannot modify edges from/to start node (0) or end node (problem_size-1)
+        valid_mask = (selected_index != start_node) & (selected_index != end_node) & \
+                     (left != start_node) & (left != end_node) & \
+                     (right != start_node) & (right != end_node)
+
         # prepare
         rec_next = rec.clone()
         right_nodes = rec.gather(1, selected_index)
         argsort = rec.argsort()
 
+        # Only apply valid actions: for invalid edges, keep original target
+        right_filtered = torch.where(valid_mask.unsqueeze(-1).expand_as(right), right, rec.gather(1, left))
+        
         # new rec
-        rec_next.scatter_(1, left, right)
+        rec_next.scatter_(1, left, right_filtered)
         cur = left[:, :1].clone()
         for i in range(dummy_graph_size - 2):  # self.size - 2 is already correct
             next_cur = rec_next.gather(1, cur)
@@ -704,10 +798,11 @@ class SOPEnv:
         sol = rec2sol(rec)
         batch_size, num_nodes = sol.size()
         updated_sol = sol.clone()
+        start_node, end_node = 0, self.problem_size - 1
 
         # Expand action to match dimensions
-        remove_indices = action[:, ::2]  # Shape (B, 3)
-        insert_indices = action[:, 1::2]  # Shape (B, 3)
+        remove_indices = action[:, ::2]  # Shape (B, rm_num)
+        insert_indices = action[:, 1::2]  # Shape (B, rm_num)
 
         for i in range(rm_num):
             # Step 1: Find the position of the node to be removed
@@ -715,26 +810,30 @@ class SOPEnv:
             remove_mask = (updated_sol == remove_idx.unsqueeze(1))  # Shape (B, N), Boolean mask for nodes to be removed
             remove_pos = remove_mask.nonzero(as_tuple=True)[1]  # Shape (B,), indices of nodes to be removed
 
-            # Step 2: Remove the node from the solution
-            keep_mask = ~remove_mask  # Invert the mask to keep other nodes
-            sol_without_removed = torch.masked_select(updated_sol, keep_mask).view(batch_size,
-                                                                                   num_nodes - 1)  # Shape (B, N-1)
-
-            # Step 3: Find the position to insert
-            insert_idx = insert_indices[:, i]  # Shape (B,)
-            insert_mask = (sol_without_removed == insert_idx.unsqueeze(1))  # Shape (B, N-1)
-            insert_pos = insert_mask.nonzero(as_tuple=True)[1]  # Shape (B,), indices of nodes to insert before/after
-
-            # Step 4: Insert the removed node before or after the specified position
-            new_sol = []
+            # Skip if trying to remove start or end node, or from position 0 or last position
+            valid_remove = (remove_idx != start_node) & (remove_idx != end_node)
             for b in range(batch_size):
-                pos = insert_pos[b].item()
-                if insert_before:
-                    new_sol.append(torch.cat((sol_without_removed[b, :pos], remove_idx[b:b + 1], sol_without_removed[b, pos:])))
-                else:
-                    new_sol.append(torch.cat((sol_without_removed[b, :pos + 1], remove_idx[b:b + 1], sol_without_removed[b, pos + 1:])))
+                if not valid_remove[b] or remove_pos[b].item() == 0 or remove_pos[b].item() == num_nodes - 1:
+                    continue
 
-            updated_sol = torch.stack(new_sol)
+                # Step 2: Remove the node from the solution
+                keep_mask = ~remove_mask[b]
+                sol_without_removed = torch.masked_select(updated_sol[b], keep_mask).view(num_nodes - 1)
+
+                # Step 3: Find the position to insert
+                insert_idx = insert_indices[b, i]
+                insert_mask = (sol_without_removed == insert_idx)
+                insert_pos = insert_mask.nonzero(as_tuple=True)[0]
+                
+                if len(insert_pos) == 0 or insert_pos[0].item() == 0 or insert_pos[0].item() == num_nodes - 2:
+                    continue
+                
+                pos = insert_pos[0].item()
+                if insert_before:
+                    new_sol = torch.cat((sol_without_removed[:pos], remove_idx[b:b+1], sol_without_removed[pos:]))
+                else:
+                    new_sol = torch.cat((sol_without_removed[:pos+1], remove_idx[b:b+1], sol_without_removed[pos+1:]))
+                updated_sol[b] = new_sol
 
         return sol2rec(updated_sol.unsqueeze(1)).squeeze(1)
 
