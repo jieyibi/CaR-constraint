@@ -58,15 +58,13 @@ cd ../..
 
 ## Usage
 
-## Train
+<details>
+    <summary><strong>Train</strong></summary>
 
 ```shell
 # Default: --problem=TSPTW --problem_size=50 --pomo_size=50
 
-# 1. Construction only (baseline)
-python train.py --problem={PROBLEM} --problem_size={PROBLEM_SIZE} --improve_steps=0
-
-# 2. CaR (Construction + Refinement)
+# 1. CaR (Construction + Refinement)
 python train.py --problem={PROBLEM} --problem_size={PROBLEM_SIZE} --improve_steps={IMPROVE_STEPS}
 
 # Note: 
@@ -77,23 +75,19 @@ python train.py --problem={PROBLEM} --problem_size={PROBLEM_SIZE} --improve_step
 #    --unified_encoder: whether to use shared encoder for construction and improvement (default: True)
 #    --improvement_method: "rm_n_insert" or "kopt" (default: "rm_n_insert")
 #    --select_top_k: number of solutions to select for improvement (default: 10)
-```
 
-## Evaluation
+# 2. Construction only (baseline)
+python train.py --problem={PROBLEM} --problem_size={PROBLEM_SIZE} --improve_steps=0
+```
+</details> 
+
+<details>
+    <summary><strong>Evaluation</strong></summary>
 
 ```shell
 # Default: --problem=TSPTW --problem_size=50
 
-# 1. Construction only
-
-# If you want to evaluate on your own dataset,
-python test.py --test_dataset={TEST_DATASET} --checkpoint={MODEL_PATH} --improve_steps=0
-# Optional: add `--opt_sol_path` to calculate optimality gap.
-
-# If you want to evaluate on the provided dataset,
-python test.py --problem={PROBLEM} --problem_size={PROBLEM_SIZE} --checkpoint={MODEL_PATH} --improve_steps=0
-
-# 2. CaR (Construction + Refinement)
+# 1. CaR (Construction + Refinement)
 
 # If you want to evaluate on your own dataset,
 python test.py --test_dataset={TEST_DATASET} --checkpoint={MODEL_PATH} --improve_steps={IMPROVE_STEPS} --validation_improve_steps={VAL_IMPROVE_STEPS}
@@ -102,8 +96,20 @@ python test.py --test_dataset={TEST_DATASET} --checkpoint={MODEL_PATH} --improve
 # If you want to evaluate on the provided dataset,
 python test.py --problem={PROBLEM} --problem_size={PROBLEM_SIZE} --checkpoint={MODEL_PATH} --improve_steps={IMPROVE_STEPS} --validation_improve_steps={VAL_IMPROVE_STEPS}
 
+# 2. Construction only
+
+# If you want to evaluate on your own dataset,
+python test.py --test_dataset={TEST_DATASET} --checkpoint={MODEL_PATH} --improve_steps=0
+# Optional: add `--opt_sol_path` to calculate optimality gap.
+
+# If you want to evaluate on the provided dataset,
+python test.py --problem={PROBLEM} --problem_size={PROBLEM_SIZE} --checkpoint={MODEL_PATH} --improve_steps=0
+
+
 # Please set your own `--test_batch_size` based on your GPU memory constraint.
 ```
+
+</details> 
 
 <details>
     <summary><strong>Generate data</strong></summary>
@@ -112,14 +118,15 @@ For evaluation, you can use our [provided datasets](https://github.com/jieyibi/C
 
 ```shell
 # Default: --problem="TSPTW" --problem_size=50 --num_samples=10000 --hardness="hard"
-python generate_data.py --problem={PROBLEM} --problem_size={PROBLEM_SIZE} --num_samples={NUM_SAMPLES} --hardness ={HARDNESS}```
+python generate_data.py --problem={PROBLEM} --problem_size={PROBLEM_SIZE} --num_samples={NUM_SAMPLES} --hardness={HARDNESS}
+```
 
 Supported problems: `CVRP`, `TSPTW`, `TSPDL`, `VRPBLTW`, `SOP`
 
 For SOP, you can specify:
-- `--sop_variant`: `1` or `2` (default: `1`, see appendix for detailed settings) 
+- `--sop_variant`: `1` or `2` (default: `1`, see appendix for detailed settings)
 
-</details>
+</details>  
 
 
 <details>
