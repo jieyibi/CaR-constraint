@@ -26,6 +26,13 @@ For more details, please see our paper [Towards Efficient Constraint Handling in
     year={2026}
 }
 ```
+
+## Overview
+
+<p align="center">
+  <img src="plot/overall.pdf" alt="CaR Framework Overview" width="800"/>
+</p>
+
 ---
 ## How to play with CaR
 You could follow the command below to clone our repo and set up the running environment. 
