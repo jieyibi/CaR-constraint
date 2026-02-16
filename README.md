@@ -30,7 +30,7 @@ For more details, please see our paper [Towards Efficient Constraint Handling in
 ## Overview
 
 <p align="center">
-  <img src="plot/overall.pdf" alt="CaR Framework Overview" width="800"/>
+  <img src="plot/overall.png" alt="CaR Framework Overview" width="800"/>
 </p>
 
 ---
