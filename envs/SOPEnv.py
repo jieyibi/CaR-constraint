@@ -48,10 +48,18 @@ class SOPEnv:
         self.problem_size = env_params['problem_size']
         self.pomo_size = env_params['pomo_size']
         self.loc_scaler = env_params['loc_scaler'] if 'loc_scaler' in env_params.keys() else None
-        # hardness control parameters
-        self.precedence_ratio = env_params['precedence_ratio']
-        self.geometric_conflict_ratio = env_params['geometric_conflict_ratio']
-        self.precedence_balance_ratio = env_params.get('precedence_balance_ratio', 0.0)  # 0.0: no balance, 1.0: full balance
+        # Set SOP parameters based on variant
+        sop_variant = env_params.get('sop_variant', 1)  # default to variant 1
+        if sop_variant == 1:
+            self.precedence_ratio = 0.2
+            self.geometric_conflict_ratio = 0.3
+            self.precedence_balance_ratio = 0.0
+        elif sop_variant == 2:
+            self.precedence_ratio = 0.2
+            self.geometric_conflict_ratio = 0.8
+            self.precedence_balance_ratio = 0.0
+        else:
+            raise ValueError(f"Unknown SOP variant: {sop_variant}")
 
         self.epsilon = EPSILON_hardcoded
         self.k_max = self.env_params['k_max'] if 'k_max' in env_params.keys() else None

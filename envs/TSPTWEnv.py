@@ -270,8 +270,7 @@ class TSPTWEnv:
         ####################################
         self.problem = "TSPTW"
         self.env_params = env_params
-        self.tw_type = env_params['tw_type']
-        self.tw_duration = env_params['tw_duration']
+        self.hardness = env_params.get('hardness', 'hard')  # 'hard', 'medium', 'easy' (default: 'hard')
         self.problem_size = env_params['problem_size']
         self.epsilon = EPSILON[self.problem_size]
         self.k_max = self.env_params['k_max'] if 'k_max' in env_params.keys() else None
@@ -605,13 +604,29 @@ class TSPTWEnv:
 
     def get_random_problems(self, batch_size, problem_size, normalized=True, coord_factor=100, max_tw_gap=10, max_tw_size=100):
 
-        tw_type = self.tw_type
+        # Use hardness (default: 'hard')
+        hardness = self.hardness if self.hardness is not None else 'hard'
+        if hardness == "hard":
+            # Use da_silva style for hard instances (as in reference code)
+            tw_type = "da_silva"
+        elif hardness in ["easy", "medium"]:
+            # Use generate_tsptw_data for easy and medium instances
+            tw_duration = "5075" if hardness == "easy" else "1020"
+            tw = generate_tsptw_data(size=batch_size, graph_size=problem_size, time_factor=problem_size*55, tw_type="naive/hard", tw_duration=tw_duration)
+            node_xy = torch.tensor(tw.node_loc).float()
+            time_windows = torch.tensor(tw.node_tw)
+            service_time = torch.zeros(size=(batch_size, problem_size))
+            return node_xy, service_time, time_windows[:,:,0], time_windows[:,:,1]
+        else:
+            raise NotImplementedError(f"Unknown hardness: {hardness}")
 
         if tw_type in ["cappart", "da_silva"]:
             # Taken from DPDP (Kool et. al)
             # Taken from https://github.com/qcappart/hybrid-cp-rl-solver/blob/master/src/problem/tsptw/environment/tsptw.py
             # max_tw_size = 1000 if tw_type == "da_silva" else 100 attention
-            max_tw_size = problem_size * 2 if tw_type == "da_silva" else 100
+            # For hard instances, use problem_size * 2
+            if self.hardness == "hard":
+                max_tw_size = problem_size * 2 if tw_type == "da_silva" else 100
             """
             :param problem_size: number of cities
             :param grid_size (=1): x-pos/y-pos of cities will be in the range [0, grid_size]
@@ -748,31 +763,6 @@ class TSPTWEnv:
             # node = torch.tensor(node)
             # node_xy = torch.cat([depot, node], dim=0).unsqueeze(0)
             # time_windows = torch.tensor(time_windows).unsqueeze(0)
-        elif tw_type == "zhang":
-            TSPTW_SET = namedtuple("TSPTW_SET",
-                                   ["node_loc",  # Node locations 1
-                                    "node_tw",  # node time windows 5
-                                    "durations",  # service duration per node 6
-                                    "service_window",  # maximum of time units 7
-                                    "time_factor", "loc_factor"])
-            # tw = generate_tsptw_data(size=batch_size, graph_size=problem_size, time_factor=1.42,
-            #                          tw_type="naive/hard", tw_duration=self.tw_duration) # 1.42 = sqrt()
-            tw = generate_tsptw_data(size=batch_size, graph_size=problem_size, time_factor=problem_size*55, tw_type="naive/hard", tw_duration=self.tw_duration)
-            node_xy = torch.tensor(tw.node_loc).float()
-            time_windows = torch.tensor(tw.node_tw)
-        elif tw_type == "random":
-            node_xy = torch.rand(size=(batch_size, problem_size, 2))  # (batch, problem, 2)
-            service_window = int(1.42 * problem_size)
-            tw_start = torch.rand(size=(batch_size, problem_size, 1)) * (service_window/2)
-            episilon = ((torch.rand(size=(batch_size, problem_size, 1)) * 0.8) + 0.1) * (service_window/2) #[0.1,0.9]
-            tw_end = tw_start + episilon
-            # Normalize as in DPDP (Kool et. al)
-            # Upper bound for depot = max(node ub + dist to depot), to make this tight
-            tw_start[:, 0, 0] = 0.
-            tw_end[:, 0, 0] = (torch.cdist(node_xy[:, None, 0], node_xy[:, 1:]).squeeze(1) + tw_end[:, 1:, 0]).max(dim=1)[0]
-            time_windows = torch.cat([tw_start, tw_end], dim=-1)
-        else:
-            raise NotImplementedError
 
         service_time = torch.zeros(size=(batch_size,problem_size))
         # Don't store travel time since it takes up much

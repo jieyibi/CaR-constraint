@@ -56,7 +56,7 @@ class TSPDLEnv:
         self.env_params = env_params
         self.problem_size = env_params['problem_size']
         self.pomo_size = env_params['pomo_size']
-        self.dl_percent = env_params['dl_percent']
+        self.hardness = env_params.get('hardness', 'hard')  # 'hard', 'medium', 'easy' (default: 'hard')
         self.loc_scaler = env_params['loc_scaler'] if 'loc_scaler' in env_params.keys() else None
 
         self.epsilon = EPSILON[self.problem_size]
@@ -357,7 +357,14 @@ class TSPDLEnv:
         return data
 
     def get_random_problems(self, batch_size, problem_size, normalized=True):
-        dl_percent =self.dl_percent
+        # Use hardness (default: 'hard')
+        hardness = self.hardness if self.hardness is not None else 'hard'
+        dl_percent_DICT = {
+            "hard": 90,
+            "medium": 75,
+            "easy": 50,
+        }
+        dl_percent = dl_percent_DICT[hardness]
         node_xy = torch.rand(size=(batch_size, problem_size, 2))  # (batch, problem, 2)
         node_demand = torch.cat([torch.zeros((batch_size, 1)), torch.ones((batch_size, problem_size - 1))], dim=1)
         # (batch, problem) 0,1,1,1,1,....

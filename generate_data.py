@@ -10,12 +10,8 @@ if __name__ == "__main__":
     parser.add_argument('--limited_vehicle_number', type=int, default=0, choices=["adaptive", "plus1"])
     parser.add_argument('--problem_size', type=int, default=50)
     parser.add_argument('--pomo_size', type=int, default=50, help="the number of start node, should <= problem size")
-    parser.add_argument('--tw_type', type=str, default="da_silva",choices=["da_silva", "cappart", "zhang"])
-    parser.add_argument('--tw_duration', type=str, default="test", choices=["1020", "75100", "2550", "5075", "random"])
-    parser.add_argument('--dl_percent', type=int, default=60, help="percentage of nodes that DL < total demand for TSPDL")
-    parser.add_argument('--precedence_ratio', type=float, default=0.2, help="ratio of precedence constraints")
-    parser.add_argument('--geometric_conflict_ratio', type=float, default=0.8, help="ratio of geometric conflict constraints")
-    parser.add_argument('--precedence_balance_ratio', type=float, default=0., help="ratio of precedence balance constraints")
+    parser.add_argument('--hardness', type=str, default="hard", choices=["hard", "medium", "easy"], help="hardness level: hard/medium/easy for TSPTW and TSPDL (default: hard)")
+    parser.add_argument('--sop_variant', type=int, default=1, choices=[1, 2], help="SOP variant: 1 or 2 (default: 1). Variant 1: precedence_ratio=0.2, geometric_conflict_ratio=0.3, precedence_balance_ratio=0. Variant 2: precedence_ratio=0.2, geometric_conflict_ratio=0.8, precedence_balance_ratio=0")
     parser.add_argument('--num_samples', type=int, default=10000)
     parser.add_argument('--seed', type=int, default=2025)
     parser.add_argument('--dir', type=str, default="./data")
@@ -24,16 +20,13 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     pp.pprint(vars(args))
+    
     env_params = {
         "problem_size": args.problem_size,
         "pomo_size": args.pomo_size,
-        "tw_type": args.tw_type,
-        "dl_percent": args.dl_percent,
-        "tw_duration": args.tw_duration,
+        "hardness": args.hardness,
+        "sop_variant": args.sop_variant,
         "limited_vehicle_number": args.limited_vehicle_number,
-        "precedence_ratio": args.precedence_ratio,
-        "geometric_conflict_ratio": args.geometric_conflict_ratio,
-        "precedence_balance_ratio": args.precedence_balance_ratio,
     }
     seed_everything(args.seed)
 
@@ -51,11 +44,11 @@ if __name__ == "__main__":
     for env in envs:
         env = env(**env_params)
         if args.problem == "TSPTW":
-            dataset_path = os.path.join(args.dir, env.problem, f"{env.problem.lower()}{args.problem_size}_{args.tw_type}_uniform_varyN.pkl",)
+            dataset_path = os.path.join(args.dir, env.problem, f"{env.problem.lower()}{args.problem_size}_{args.hardness}.pkl",)
         elif args.problem == "TSPDL":
-            dataset_path = os.path.join(args.dir, env.problem, f"{env.problem.lower()}{args.problem_size}_q{args.dl_percent}_uniform_fsb.pkl",)
+            dataset_path = os.path.join(args.dir, env.problem, f"{env.problem.lower()}{args.problem_size}_{args.hardness}.pkl",)
         elif args.problem == "SOP":
-            dataset_path = os.path.join(args.dir, env.problem, f"{env.problem.lower()}{args.problem_size}_uniform_prec{args.precedence_ratio}_geom{args.geometric_conflict_ratio}_bal{args.precedence_balance_ratio}.pkl",)
+            dataset_path = os.path.join(args.dir, env.problem, f"{env.problem.lower()}{args.problem_size}_uniform_variant{args.sop_variant}.pkl",)
         elif args.problem == "CVRP" and args.limited_vehicle_number is not None:
             dataset_path = os.path.join(args.dir, env.problem, f"{env.problem.lower()}{args.problem_size}_uniform_LV{args.limited_vehicle_number}.pkl")
         else:

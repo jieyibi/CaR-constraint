@@ -49,7 +49,7 @@ def get_lkh_executable(url="http://webhotel4.ruc.dk/~keld/research/LKH-3/LKH-3.0
 
 
 def solve_lkh_log(executable, directory, name, depot, loc, demand, capacity, vehicle=None, route_limit=None, service_time=None, tw_start=None, tw_end=None, draft_limit = None,
-                  precedence_matrix=None, runs=1, MAX_TRIALS=10000, grid_size=1, scale=100000, seed=1234, disable_cache=True, problem="CVRP"):
+                  precedence_matrix=None, route=None, runs=1, MAX_TRIALS=10000, grid_size=1, scale=100000, seed=1234, disable_cache=True, problem="CVRP"):
 
     if problem == "SOP":
         problem_filename = os.path.join(directory, "{}.lkh{}.sop".format(name, runs))
@@ -76,6 +76,14 @@ def solve_lkh_log(executable, directory, name, depot, loc, demand, capacity, veh
                       "RUNS": runs,
                       "SEED": seed,
                       "MAX_TRIALS": MAX_TRIALS}
+
+            if route is not None:
+                alg_name = 'lkh'
+                basename = "{}.{}{}_{}".format(name, alg_name, runs, MAX_TRIALS)
+                initial_tour_filename = os.path.join(directory, "{}.init_tour".format(basename))
+                write_init_tour(initial_tour_filename,  [x + 1 for x in route], name)  # +1 for index aligning
+                params["INITIAL_TOUR_FILE"] = initial_tour_filename
+
             write_lkh_par(param_filename, params)
 
             with open(log_filename, 'w') as f:
@@ -177,6 +185,26 @@ def write_lkh_par(filename, parameters):
                 f.write("{}\n".format(k))
             else:
                 f.write("{} = {}\n".format(k, v))
+
+
+def write_init_tour(filename, route, name="problem"):
+    with open(filename, 'w') as f:
+        f.write("\n".join([
+            "{} : {}".format(k, v)
+            for k, v in (
+                ("NAME", name),
+                ("TYPE", "TOUR"),
+                ("DIMENSION", len(route)),
+            )
+        ]))
+        f.write("\n")
+        f.write("TOUR_SECTION\n")
+        f.write("\n".join([
+            "{}".format(r) for r in route
+        ]))
+        f.write("\n")
+        f.write("-1\n")
+        f.write("EOF\n")
 
 
 def read_lkh_vrplib(filename, n):
@@ -481,8 +509,8 @@ def write_sop_lkh(filename, loc, precedence_matrix, grid_size=1, scale=100000, n
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="LKH baseline, due to different problem settings, not recommend to use LKH3 to solve VRPB and VRPBTW")
-    parser.add_argument('--problem', type=str, default="SOP", choices=["TSPTW", "CVRP", "OVRP", "VRPL", "VRPTW", "VRPB", "VRPBTW", "SOP"])
-    parser.add_argument("--datasets", nargs='+', default=["../data/SOP/sop50_uniform_prec0.2_geom0.8_bal0.0.pkl", ], help="Filename of the dataset(s) to evaluate")
+    parser.add_argument('--problem', type=str, default="TSPTW", choices=["TSPTW", "CVRP", "OVRP", "VRPL", "VRPTW", "VRPB", "VRPBTW", "SOP"])
+    parser.add_argument("--datasets", nargs='+', default=["../data/TSPTW/tsptw50_hard.pkl", ], help="Filename of the dataset(s) to evaluate")
     parser.add_argument("-f", action='store_false', help="Set true to overwrite")
     parser.add_argument("-o", default=None, help="Name of the results file to write")
     parser.add_argument("--cpus", default=16, type=int, help="Number of CPUs to use, defaults to all cores")

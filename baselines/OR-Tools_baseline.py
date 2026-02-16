@@ -14,8 +14,19 @@ from utils import check_extension, load_dataset, save_dataset, run_all_in_pool
 
 SPEED = 1.0
 SCALE = 100000  # EAS uses 1000, while AM uses 100000
-TIME_HORIZON = 3  # the tw_end for the depot node, all vehicles should return to depot before T
 DRAFT_HORIZON = 1000  # the maximal draft limit
+CNT = 0
+
+def get_time_horizon(problem, problem_size=None):
+    """
+    Get time horizon based on problem type and size.
+    - TSPTW50: 5500
+    - CVRPBLTW and others: 3
+    """
+    if problem == "TSPTW" and problem_size == 50:
+        return 5500
+    else:
+        return 3
 
 
 def create_data_model(depot, loc, demand=None, capacity=None, route_limit=None, service_time=None, tw_start=None, tw_end=None, draft=None, grid_size=1, problem="CVRP"):
@@ -53,7 +64,11 @@ def create_data_model(depot, loc, demand=None, capacity=None, route_limit=None, 
         data['time_windows'] = [(to_int(e), to_int(l)) for e, l in zip([0]+tw_start, [0]+tw_end)]
         data['service_time'] = to_int(service_time[0])
 
-    if problem in ["TSPTW"]:
+    if problem in ["TSPDL"]:
+        data['demands'] = [int(i) for i in demand]
+        data['draft'] = [int(i) for i in draft]
+        # data['draft'] = [50 for i in draft]
+    elif problem in ["TSPTW"]:
         # for depot: [0., 0.] -> Cumul(depot) = 0: vehicle must be at time 0 at depot
         data['time_windows'] = [(to_int(e), to_int(l)) for e, l in zip([0] + tw_start[1:], [0] + tw_end[1:])]
         data['service_time'] = 0
@@ -215,7 +230,7 @@ def add_draft_constraints(routing, manager, data, demand_evaluator_index, proble
         capacity_dimension.CumulVar(index).SetRange(0, 0)
 
 
-def add_time_window_constraints(routing, manager, data, time_evaluator_index, grid_size=1, time_horizon=None):
+def add_time_window_constraints(routing, manager, data, time_evaluator_index, grid_size=1, time_horizon=None, problem="CVRP", problem_size=None):
     """
         Add Global Span constraint.
     """
@@ -223,7 +238,8 @@ def add_time_window_constraints(routing, manager, data, time_evaluator_index, gr
     if time_horizon is not None:
         horizon = int(time_horizon / grid_size * SCALE + 0.5)
     else:
-        horizon = int(TIME_HORIZON / grid_size * SCALE + 0.5)
+        default_time_horizon = get_time_horizon(problem, problem_size)
+        horizon = int(default_time_horizon / grid_size * SCALE + 0.5)
     routing.AddDimension(
         time_evaluator_index,
         horizon,  # allow waiting time
@@ -420,8 +436,11 @@ def solve_or_tools_log(directory, name, depot, loc, demand, capacity, route_limi
     # Add Time Window (TW) constraint
     if problem in ["TSPTW", "VRPTW", "VRPBTW", "VRPLTW", "OVRPTW", "VRPBLTW", "OVRPLTW", "OVRPBTW", "OVRPBLTW"]:
         time_evaluator_index = routing.RegisterTransitCallback(partial(create_time_evaluator(data), manager))
-        time_horizon = tw_end[0] if tw_end is not None and len(tw_end) > 0 else None
-        add_time_window_constraints(routing, manager, data, time_evaluator_index, grid_size=grid_size, time_horizon=time_horizon)
+        # Get time horizon based on problem type and size
+        problem_size = len(loc) if loc is not None else None
+        default_time_horizon = get_time_horizon(problem, problem_size)
+        time_horizon = tw_end[0] if tw_end is not None and len(tw_end) > 0 else default_time_horizon
+        add_time_window_constraints(routing, manager, data, time_evaluator_index, grid_size=grid_size, time_horizon=time_horizon, problem=problem, problem_size=problem_size)
 
     # Add Duration Limit (L) constraint
     if problem in ["VRPL", "VRPBL", "VRPLTW", "OVRPL", "VRPBLTW", "OVRPBL", "OVRPLTW", "OVRPBLTW"]:
@@ -454,16 +473,17 @@ def solve_or_tools_log(directory, name, depot, loc, demand, capacity, route_limi
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="OR-Tools baseline")
-    parser.add_argument('--problem', type=str, default="VRPBLTW", choices=["CVRP", "OVRP", "VRPB", "VRPL", "VRPTW", "OVRPTW",
+    parser.add_argument('--problem', type=str, default="TSPTW", choices=["CVRP", "OVRP", "VRPB", "VRPL", "VRPTW", "OVRPTW",
                                                                         "OVRPB", "OVRPL", "VRPBL", "VRPBTW", "VRPLTW",
-                                                                        "OVRPBL", "OVRPBTW", "OVRPLTW", "VRPBLTW", "OVRPBLTW", "TSPTW", "TSPDL"])
-    parser.add_argument("--datasets", nargs='+', default=["../data/VRPBLTW/vrpbltw200_uniform.pkl", ], help="Filename of the dataset(s) to evaluate")
+                                                                        "OVRPBL", "OVRPBTW", "OVRPLTW", "VRPBLTW", "OVRPBLTW", 
+                                                                        "TSPTW", "TSPDL"])
+    parser.add_argument("--datasets", nargs='+', default=["../data/TSPTW/tsptw50_hard.pkl", ], help="Filename of the dataset(s) to evaluate")
     parser.add_argument("-f", action='store_false', help="Set true to overwrite")
     parser.add_argument("-o", default=None, help="Name of the results file to write")
     parser.add_argument("--cpus", type=int, default=16, help="Number of CPUs to use, defaults to all cores")
     parser.add_argument('--progress_bar_mininterval', type=float, default=0.1, help='Minimum interval')
-    parser.add_argument('-n', type=int, default=128, help="Number of instances to process")
-    parser.add_argument('-timelimit', type=int, default=800, help="timelimit (seconds) for OR-Tools to solve an instance")
+    parser.add_argument('-n', type=int, default=10000, help="Number of instances to process")
+    parser.add_argument('-timelimit', type=int, default=200, help="timelimit (seconds) for OR-Tools to solve an instance")
     parser.add_argument('-seed', type=int, default=1234, help="random seed")
     parser.add_argument('--offset', type=int, default=0, help="Offset where to start processing")
     parser.add_argument('--results_dir', default='baseline_results', help="Name of results directory")

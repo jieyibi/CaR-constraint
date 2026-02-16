@@ -1,5 +1,15 @@
+'''
+This is the implementation of the greedy heuristics for TSPTW and TSPDL
+Two heuristics are supported:
+1. Greedy-L heuristic selects the candidate with the shortest distance (length)
+2. Greedy-C heuristic selects a node based on the satisfaction of constraints,
+   which is the candidate with the soonest time window end w.r.t current time in TSPTW
+   and the candidate with the minimal draft limit in TSPDL
+'''
+
 import pickle
 import numpy as np
+import argparse
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -33,7 +43,7 @@ def greedy_tsptw_instance(instance, heuristics):
         min_distance = float('inf')
         for i in range(1, num_nodes):  # Start from 1 as 0 is the depot
             if not visited[i]:
-                if heuristics == "twend":
+                if heuristics == "constraint":
                     if tw_end[i] < min_tw_end:
                         min_tw_end = tw_end[i]
                         next_node = i
@@ -87,7 +97,7 @@ def greedy_tspdl_instance(instance, heuristics):
         min_distance = float('inf')
         for i in range(1, num_nodes):  # Start from 1 as 0 is the depot
             if not visited[i]:
-                if heuristics == "dl":
+                if heuristics == "constraint":
                     if draft_limit[i] < min_draft_limit:
                         min_draft_limit = draft_limit[i]
                         next_node = i
@@ -115,6 +125,7 @@ def greedy_tspdl_instance(instance, heuristics):
 
     return (tour, total_distance, feasible)
 
+
 def greedy_tspdl_algorithm(instances, heuristics, num_workers=16):
     results = []
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
@@ -125,47 +136,81 @@ def greedy_tspdl_algorithm(instances, heuristics, num_workers=16):
     return results
 
 if __name__ == "__main__":
-    # Example usage
-    # heuristics = "dl"
-    # heuristics = "twend"
-    heuristics = "length"
-    # filepath = '/home/jieyi/Routing-Anything-main/data/TSPTW/tsptw100_da_silva_uniform.pkl'
-    # save_path = '/home/jieyi/Routing-Anything-main/data/TSPTW/greedy_{}_tsptw100_da_silva_uniform.pkl'.format(heuristics)
-    # lkh = '/home/jieyi/Routing-Anything-main/data/TSPTW/lkh_tsptw100_da_silva_uniform.pkl'
-    filepath = '/home/jieyi/Routing-Anything-main/data/TSPTW/tsptw50_zhang_uniform_1020.pkl'
-    save_path = '/home/jieyi/Routing-Anything-main/data/TSPTW/greedy_{}_tsptw50_zhang_uniform_1020.pkl'.format(heuristics)
-    lkh = '/home/jieyi/Routing-Anything-main/data/TSPTW/lkh_tsptw50_zhang_uniform_1020.pkl'
-    # filepath = "/home/jieyi/Routing-Anything-main/data/TSPDL/tspdl50_q90_uniform_fsb.pkl"
-    # lkh = "/home/jieyi/Routing-Anything-main/data/TSPDL/lkh_tspdl50_q90_uniform_fsb.pkl"
-    # save_path = '/home/jieyi/Routing-Anything-main/data/TSPDL/greedy_{}_tspdl50_q90_uniform_fsb.pkl'.format(heuristics)
-    start = time.time()
-    data = load_data(filepath)
+    parser = argparse.ArgumentParser(description="Greedy algorithm for TSPTW and TSPDL")
+    parser.add_argument("--problem", type=str, default="TSPTW", choices=["TSPTW", "TSPDL"])
+    parser.add_argument("--heuristics", type=str, default="constraint", choices=["constraint", "length"])
+    parser.add_argument("--datasets", type=str, default="../data/TSPTW/tsptw50_hard.pkl")
+    parser.add_argument("--cal_gap", action='store_true', help="Set true to calculate optimality gap")
+    parser.add_argument("--optimal_solution_path", type=str, default='../data/TSPTW/lkh_tsptw50_hard.pkl')
+    parser.add_argument("--num_workers", type=int, default=16)
+    parser.add_argument("--print_results", action='store_true',
+                        help="print tours, objectives, optimal obj., gap and feasibility for each instance")
 
-    # results = greedy_tspdl_algorithm(data, heuristics)
-    results = greedy_tsptw_algorithm(data, heuristics)
+    args = parser.parse_args()
+
+    start = time.time()
+
+    # load data
+    data = load_data(args.datasets)
+    # start greedily search
+    if args.problem == "TSPTW":
+        results = greedy_tsptw_algorithm(data, args.heuristics, args.num_workers)
+    elif args.problem == "TSPDL":
+        results = greedy_tspdl_algorithm(data, args.heuristics, args.num_workers)
+    else:
+        raise NotImplementedError
 
     duration = time.time() - start
 
+    # Post-processing
+    save_path = args.datasets.split(".pkl")[0] + "_greedy_{}.pkl".format(args.heuristics)
     save_results(results, save_path)
-    with open(lkh, 'rb') as file:
-        lkh = pickle.load(file)
+    print(">> Results are saved to {}".format(save_path))
 
-    gaps = np.array([])
-    distances = np.array([])
-    opt = np.array([])
-    feasible_cnt = 0
-    # Optionally, print or process results further
-    for i, result in enumerate(results):
-        opt = np.append(opt, lkh[i][0])
-        gap = (result[1] - lkh[i][0]) / lkh[i][0] *100
-        print("Tour {}:".format(i), result[0], "Total Distance:", result[1], "Optimal:",lkh[i][0],  "Gap:{}%".format(gap), "Feasible:", result[2])
-        if result[2]:
-            distances = np.append(distances, result[1] / 100)
-            gaps = np.append(gaps, gap)
-            feasible_cnt += 1
+    if args.cal_gap:
+        assert args.optimal_solution_path is not None, "Optimal solution path is not provided. Unable to calculate optimality gap."
 
-    print("Duration: {}".format(duration))
-    print("Average distance: {}".format(np.mean(distances)))
-    print("Average distance in LKH3: {}".format(np.mean(opt)))
-    print("Average gap: {}%".format(np.mean(gaps)))
-    print("Infeasible count: {}".format(len(results)-feasible_cnt))
+        with open(args.optimal_solution_path, 'rb') as file:
+            opt_sol = pickle.load(file)
+
+        gaps = np.array([])
+        distances = np.array([])
+        opt = np.array([])
+        feasible_cnt = 0
+
+        for i, result in enumerate(results):
+            opt = np.append(opt, opt_sol[i][0]/ 100)
+            gap = (result[1] - opt_sol[i][0]) / opt_sol[i][0] *100
+            if args.print_results:
+                print("Tour {}:".format(i), result[0],
+                      "Total Distance:", result[1],
+                      "Optimal:",opt_sol[i][0],
+                      "Gap:{}%".format(gap),
+                      "Feasible:", result[2])
+            if result[2]:
+                distances = np.append(distances, result[1] / 100)
+                gaps = np.append(gaps, gap)
+                feasible_cnt += 1
+
+        print(">> Duration: {}".format(duration))
+        print(">> Average distance: {}".format(np.mean(distances)))
+        print(">> Average distance in LKH3: {}".format(np.mean(opt)))
+        print(">> Average gap: {}%".format(np.mean(gaps)))
+        print(">> Infeasible count: {}%".format((len(results)-feasible_cnt)/len(results)*100))
+
+    else:
+        distances = np.array([])
+        feasible_cnt = 0
+
+        for i, result in enumerate(results):
+            if args.print_results:
+                print("Tour {}:".format(i), result[0],
+                      "Total Distance:", result[1],
+                      "Feasible:", result[2])
+            if result[2]:
+                distances = np.append(distances, result[1] / 100)
+                feasible_cnt += 1
+
+        print(">> Duration: {}".format(duration))
+        print(">> Average distance: {}".format(np.mean(distances)))
+        print(">> Infeasible count: {}%".format((len(results)-feasible_cnt)/len(results)*100))

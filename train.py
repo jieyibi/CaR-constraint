@@ -25,10 +25,7 @@ def cleanup():
 
 def args2dict(args):
     env_params = {"problem_size": args.problem_size, "pomo_size": args.pomo_size,
-                  "tw_type": args.tw_type, "tw_duration": args.tw_duration,
-                  "dl_percent": args.dl_percent, "random_delta_t": args.random_delta_t,
-                  "precedence_ratio": args.precedence_ratio, "geometric_conflict_ratio": args.geometric_conflict_ratio,
-                  "precedence_balance_ratio": args.precedence_balance_ratio,
+                  "hardness": args.hardness, "sop_variant": args.sop_variant, "random_delta_t": args.random_delta_t,
                   "val_dataset": args.val_dataset, "val_episodes": args.val_episodes,
                   "pomo_start": args.pomo_start, "pomo_feasible_start": args.pomo_feasible_start,
                   "k_max": args.k_max,
@@ -144,13 +141,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Towards Unified Models for Routing Problems")
     # env_params
     parser.add_argument('--problem', type=str, default="TSPTW", choices=["CVRP", "TSPTW", "TSPDL", "VRPBLTW", "SOP"])
-    parser.add_argument('--tw_type', type=str, default="da_silva", choices=["da_silva", "cappart", "zhang", "random"])
-    parser.add_argument('--tw_duration', type=str, default="1020", choices=["1020", "75100", "2550", "5075", "random", "curriculum"])
-    parser.add_argument('--dl_percent', type=int, default=90, help="percentage of nodes that DL < total demand")
+    parser.add_argument('--hardness', type=str, default="hard", choices=["hard", "medium", "easy"], help="hardness level: hard/medium/easy for TSPTW and TSPDL (default: hard)")
+    parser.add_argument('--sop_variant', type=int, default=1, choices=[1, 2], help="SOP variant: 1 or 2 (default: 1)")
     parser.add_argument('--random_delta_t', type=float, default=0)
-    parser.add_argument('--precedence_ratio', type=float, default=0.2)
-    parser.add_argument('--geometric_conflict_ratio', type=float, default=0.8)
-    parser.add_argument('--precedence_balance_ratio', type=float, default=0.0)
     parser.add_argument('--problem_size', type=int, default=50)
     parser.add_argument('--pomo_size', type=int, default=50, help="the number of start node, should <= problem size")
     parser.add_argument('--pomo_start', type=bool, default=False)
