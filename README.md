@@ -10,7 +10,7 @@
 
 ---
 
-Hi there! Thanks for your attention to our work!🤝
+Hi there! Thanks for your attention to our work!🤝 Welcome to stop by our poster and chat with me in Rio!
 
 This is the PyTorch code for the **Construct-and-Refine (CaR)** framework for neural routing solvers.
 
