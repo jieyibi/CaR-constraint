@@ -178,6 +178,23 @@ For SOP, you can specify:
 
 </details>  
 
+<details>
+    <summary><strong>Analysis Tools</strong></summary>
+
+The `analysis/` folder contains utilities for analyzing model performance and solution quality:
+
+- **`similarity.py`**: Similarity metrics and visualization tools for TSPTW/VRP solutions (please save the solution first before running!)
+  - Trajectory visualization: `python analysis/similarity.py --mode tw50_traj --instances 10`
+  - Solution grid visualization: `python analysis/similarity.py --mode tw50_grid --grid_instance 0 --grid_num 20`
+  - Similarity analysis vs LKH: `python analysis/similarity.py --mode tw50_similarity`
+
+- **`grid_search.py`**: Grid search for hyperparameter tuning
+  - `python analysis/grid_search.py --problem TSPTW --S_list 1,2,4 --t_list 5,10,20`
+
+- **`diversity.py`**: Solution diversity analysis using multiple distance metrics (Hamming, Jaccard, Kendall Tau)
+  - `python analysis/diversity.py --file1 solution1.pt --file2 solution2.pt --metrics hamming,positional_jaccard,kendall`
+
+</details>
 
 <details>
     <summary><strong>Baseline</strong></summary>
