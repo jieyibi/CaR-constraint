@@ -132,6 +132,41 @@ def get_opt_sol_path(dir, problem, size):
     return os.path.join(dir, all_opt_sol[problem][size])
 
 
+def get_data_dir_for_problem(problem: str) -> str:
+    """
+    Map logical problem name to the actual data directory on disk.
+    For example, VRPBLTW data is stored under 'CVRPBLTW'.
+    """
+    if problem == "VRPBLTW":
+        return os.path.join("./data", "CVRPBLTW")
+    return os.path.join("./data", problem)
+
+
+def get_default_test_dataset_name(problem: str, problem_size: int, hardness: str = "hard", sop_variant: int = 1) -> str:
+    """
+    Return the default test dataset filename for a given problem and size,
+    following the naming convention used in the ./data directory.
+    """
+    if problem == "CVRP":
+        # e.g., cvrp50_uniform.pkl
+        return f"cvrp{problem_size}_uniform.pkl"
+    elif problem == "VRPBLTW":
+        # e.g., vrpbltw50_uniform.pkl (stored under ./data/CVRPBLTW)
+        return f"vrpbltw{problem_size}_uniform.pkl"
+    elif problem == "TSPTW":
+        # e.g., tsptw50_hard.pkl / tsptw50_easy.pkl / tsptw50_medium.pkl
+        return f"tsptw{problem_size}_{hardness}.pkl"
+    elif problem == "TSPDL":
+        # Currently only hard instances are provided: tspdl50_hard.pkl / tspdl100_hard.pkl
+        return f"tspdl{problem_size}_{hardness}.pkl"
+    elif problem == "SOP":
+        # e.g., sop50_uniform_variant1.pkl / sop50_uniform_variant2.pkl
+        return f"sop{problem_size}_uniform_variant{sop_variant}.pkl"
+
+    # Fallback to the old uniform naming, if needed
+    return f"{problem.lower()}{problem_size}_uniform.pkl"
+
+
 def num_param(model):
     nb_param = 0
     for param in model.parameters():
@@ -730,25 +765,6 @@ class val_metric_logger:
         self.reconstruct_masked_metrics[key] = torch.cat((self.reconstruct_masked_metrics[key], value), dim=0)
 
     def _log_output(self, trainer):
-
-
-        # if trainer.tester_params["refinement_history_path"] is not None:
-        #     # if trainer.tester_params["refinement_history_path"] is not None:
-        #     file_path = trainer.tester_params["refinement_history_path"]
-        #     torch.save(self.reward_history, "rebut/" + file_path + "_reward.pt")
-        #     print(self.reward_history.size())
-        #     torch.save(self.feasible_bsf_history, "rebut/" + file_path + "_fsb.pt" )
-        #     print(self.feasible_bsf_history.size())
-        #     torch.save(self.solution_history, "rebut/" + file_path + "_solution.pt")
-        #     print(self.solution_history.size())
-        #
-        #     all_pack = [
-        #         (r.item(), bool(f), s.tolist())
-        #         for r, f, s in zip(self.best_reward_all, self.best_feasible_all, self.best_solution_all)
-        #     ]
-        #     with open(trainer.tester_params["refinement_history_path"], 'wb') as f:
-        #         pickle.dump(all_pack, f, pickle.HIGHEST_PROTOCOL)
-        #     print(f"Best solution saved to {trainer.tester_params['best_solution_path']}, size: {self.best_solution_all.size()}")
 
         # construction
         no_aug_score = self.construct_metrics["no_aug_score"]

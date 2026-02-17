@@ -3,6 +3,7 @@ import argparse
 import pprint as pp
 from datetime import datetime
 import wandb
+import torch
 from Trainer import Trainer
 from utils import *
 import torch.distributed as dist
@@ -26,6 +27,7 @@ def args2dict(args):
     env_params = {"problem_size": args.problem_size, "pomo_size": args.pomo_size,
                   "hardness": args.hardness, "sop_variant": args.sop_variant, "random_delta_t": args.random_delta_t,
                   "val_dataset": args.val_dataset, "val_episodes": args.val_episodes,
+                  "val_opt_path": args.val_opt_path, "test_opt_path": args.test_opt_path,
                   "pomo_start": args.pomo_start, "pomo_feasible_start": args.pomo_feasible_start,
                   "k_max": args.k_max,
                   # reward shaping
@@ -34,7 +36,7 @@ def args2dict(args):
 
     tester_params = {"eval_only": args.eval_only, "test_episodes": args.test_episodes,
                      "test_batch_size": args.test_batch_size, "test_dataset": args.test_dataset,
-                     "test_z_sample_size": args.test_z_sample_size, "test_pomo_size": args.test_pomo_size,
+                     "test_pomo_size": args.test_pomo_size,
                      "sample_size": args.sample_size, "aux_mask": args.aux_mask, "is_lib": args.is_lib,
                      "refinement_history_path": args.refinement_history_path, "best_solution_path": args.best_solution_path,
                      'EAS_params': {
@@ -52,6 +54,7 @@ def args2dict(args):
                     "qkv_dim": args.qkv_dim, "head_num": args.head_num, "logit_clipping": args.logit_clipping,
                     "ff_hidden_dim": args.ff_hidden_dim, "eval_type": args.eval_type,
                     "norm": args.norm, "norm_loc": args.norm_loc, "problem": args.problem,
+                    "use_fast_attention": args.use_fast_attention,
                     "dual_decoder": args.dual_decoder, "clean_cache": args.clean_cache,
                     "gumbel": args.gumbel,
                     # improvement
@@ -68,7 +71,7 @@ def args2dict(args):
                     # TSPTW
                     "tw_normalize": args.tw_normalize,
                     # SOP
-                    "pairwise_merge": args.pairwise_merge, "which_feature": args.which_feature, "succ_attention_bias": args.succ_attention_bias,
+                    "pairwise_merge": args.pairwise_merge.split(",") if isinstance(args.pairwise_merge, str) else args.pairwise_merge, "which_feature": args.which_feature, "succ_attention_bias": args.succ_attention_bias,
                     }
 
     optimizer_params = {"optimizer": {"lr": args.lr, "weight_decay": args.weight_decay},
@@ -131,31 +134,80 @@ def set_problem_defaults(args):
         args.n2s_decoder = False
         args.test_batch_size = 1000
         args.test_episodes = 1000
+        args.test_pomo_size = args.problem_size
+        args.pomo_size = args.problem_size  # Ensure pomo_size <= problem_size for CVRP
+        args.soft_constrained = False
+        args.select_top_k_val = 2 if args.problem_size == 50 else 1
+        args.eval_type = "softmax"
     elif problem == "VRPBLTW":
         args.pomo_start = False
+        args.soft_constrained = True
         args.supplement_feature_dim = 17
-        args.improvement_method = "rm_n_insert"
-        args.n2s_decoder = True
+        if "rr" in args.checkpoint:
+            args.improvement_method = "rm_n_insert"
+            args.n2s_decoder = True
+        else:
+            args.improvement_method = "kopt"
+            args.n2s_decoder = False
         args.aux_mask = True
         args.test_batch_size = 1000
         args.test_episodes = 1000
     elif problem == "TSPDL" or problem == "TSPTW":
         args.pomo_start = False
+        args.soft_constrained = True
         args.supplement_feature_dim = 5
         args.improvement_method = "kopt"
         args.n2s_decoder = False
-        args.test_batch_size = 3334
         args.test_episodes = 10000
-        args.generate_PI_mask = True
-        args.use_real_PI_mask = True
+        args.test_batch_size = 3334 if args.problem_size == 50 else 1250
+        args.eval_type = "softmax"
+        if "PIP" in args.checkpoint:
+            args.generate_PI_mask = True
+            args.use_real_PI_mask = True
+        else:
+            args.generate_PI_mask = False
+            args.use_real_PI_mask = False
     elif problem == "SOP":
+        args.eval_type = "softmax"
+        args.soft_constrained = False
         args.pomo_start = False
         args.supplement_feature_dim = 5
         args.improvement_method = "rm_n_insert"
         args.n2s_decoder = True
-        args.test_batch_size = 3334
         args.test_episodes = 10000
+        args.test_batch_size = 3334
+        if "Variant1" in args.checkpoint: args.sop_variant = 1
+        elif "Variant2" in args.checkpoint: args.sop_variant = 2
 
+
+def print_test_config(rank, args, env_params, model_params, trainer_params, tester_params):
+    """Print important test configuration parameters in a formatted way"""
+    if rank != 0:
+        return
+    
+    print("\n" + "="*70)
+    print(" " * 20 + "TEST CONFIGURATION")
+    print("="*70)
+    print(f"  Problem:              {args.problem} (Size: {env_params['problem_size']}, Hardness: {env_params.get('hardness', 'N/A')})")
+    print(f"  Checkpoint:           {trainer_params['checkpoint']}")
+    print(f"  Test Episodes:        {tester_params['test_episodes']} | Batch Size: {tester_params['test_batch_size']}")
+    print(f"  Validation Improve Steps: {trainer_params['validation_improve_steps']}")
+    print(f"  Soft Constrained:     {trainer_params['soft_constrained']}")
+    print(f"  Improvement Method:   {model_params['improvement_method']} | N2S Decoder: {model_params['n2s_decoder']}")
+    print(f"  POMO Start:           {env_params['pomo_start']} | Test POMO Size: {tester_params['test_pomo_size']}")
+    print(f"  Unified Encoder:       {model_params['unified_encoder']} | Unified Decoder: {model_params['unified_decoder']}")
+    print(f"  Eval Type:            {model_params['eval_type']}")
+    print(f"  Sample Size:          {tester_params['sample_size']}")
+    # Problem-specific settings from set_problem_defaults
+    problem = args.problem
+    if problem == "VRPBLTW":
+        if tester_params.get('aux_mask', False):
+            print(f"  Aux Mask:             {tester_params['aux_mask']}")
+    elif problem in ["TSPDL", "TSPTW"]:
+        if trainer_params.get('generate_PI_mask', False):
+            print(f"  Generate PI Mask:     {trainer_params['generate_PI_mask']}")
+            print(f"  Use Real PI Mask:    {trainer_params.get('use_real_PI_mask', False)}")
+    print("="*70 + "\n")
 
 def main(rank, world_size, args, env_params, model_params, optimizer_params, trainer_params, tester_params):
     if args.wandb_logger and rank == 0:
@@ -166,12 +218,24 @@ def main(rank, world_size, args, env_params, model_params, optimizer_params, tra
     trainer = Trainer(args, env_params, model_params, optimizer_params, trainer_params, tester_params, rank)
     if rank==0 and not args.eval_only: copy_all_src(args.log_path)
     if args.eval_only:
+        print_test_config(rank, args, env_params, model_params, trainer_params, tester_params)
         with torch.inference_mode():
             with torch.amp.autocast("cuda"):
                 trainer.test()
     else:
         trainer.train()
     if args.multi_processing: cleanup()
+
+def str2bool(v):
+    """Convert string to boolean for argparse"""
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Towards Unified Models for Routing Problems")
@@ -182,37 +246,39 @@ if __name__ == "__main__":
     parser.add_argument('--random_delta_t', type=float, default=0)
     parser.add_argument('--problem_size', type=int, default=100)
     parser.add_argument('--pomo_size', type=int, default=100, help="the number of start node, should <= problem size")
-    parser.add_argument('--pomo_start', type=bool, default=True)
-    parser.add_argument('--pomo_feasible_start', type= bool, default=False)
+    parser.add_argument('--pomo_start', type=str2bool, default=True)
+    parser.add_argument('--pomo_feasible_start', type=str2bool, default=False)
     parser.add_argument('--fsb_start_delay', type=int, default=10000)
     parser.add_argument('--val_dataset', type=str, nargs='+', default =None)
+    parser.add_argument('--val_opt_path', type=str, default=None)
     parser.add_argument('--select_top_k_val', type=int, default=1)
     parser.add_argument('--select_top_k', type=int, default=10)
     parser.add_argument('--repeats', type=int, default=1, help="number of repeats")
     parser.add_argument('--improve_steps', type=int, default=5)
     parser.add_argument('--validation_improve_steps', type=int, default= 20)
-    parser.add_argument('--enable_eas', type=bool, default=False)
+    parser.add_argument('--enable_eas', action='store_true', default=False)
     parser.add_argument('--iterations', type=int, default=200, help='Number of iterations for EAS')
     parser.add_argument('--iterations_impr', type=int, default=20, help='Number of iterations for EAS')
     parser.add_argument('--best_solution_path', type=str, default=None)
     parser.add_argument('--refinement_history_path', type=str, default=None)
 
     # tester_params
-    parser.add_argument('--eval_only', type=bool, default=True)
+    parser.add_argument('--eval_only', type=str2bool, default=True)
+    parser.add_argument('--disable_preset_args', action='store_false', default=True)
     parser.add_argument('--test_episodes', type=int, default=1000)
     parser.add_argument('--test_batch_size', type=int, default=1000)
     parser.add_argument("--test_pomo_size", type=int, default=1)
     parser.add_argument('--test_dataset', type=str, default=None)
-    parser.add_argument('--is_lib', type=bool, default=False)
-    parser.add_argument('--test_z_sample_size', type=int, default=0)
+    parser.add_argument('--test_opt_path', type=str, default=None)
+    parser.add_argument('--is_lib', type=str2bool, default=False)
     parser.add_argument('--eval_type', type=str, default="argmax", choices=["argmax", "softmax"])
     parser.add_argument('--sample_size', type=int, default = 1)
-    parser.add_argument('--aux_mask', type=bool, default=False, help="only activates when problem == VRPBLTW")
+    parser.add_argument('--aux_mask', type=str2bool, default=False, help="only activates when problem == VRPBLTW")
 
     # load
-    parser.add_argument('--gpu_id', type=str, default="3")
+    parser.add_argument('--gpu_id', type=str, default="0")
     parser.add_argument('--checkpoint', type=str, default=None, help="Path to checkpoint file")
-    parser.add_argument('--load_optimizer', type=bool, default=False)
+    parser.add_argument('--load_optimizer', type=str2bool, default=False)
 
     # model_params
     parser.add_argument('--model_type', type=str, default="SINGLE", choices=["SINGLE", "MTL", "MOE"])
@@ -221,18 +287,19 @@ if __name__ == "__main__":
     parser.add_argument('--encoder_layer_num', type=int, default=6, help="the number of MHA in encoder")
     parser.add_argument("--impr_encoder_start_idx", type=int, default=0)
     parser.add_argument('--decoder_layer_num', type=int, default=1, help="the number of MHA in decoder")
-    parser.add_argument('--unified_encoder', type=bool, default=True)
-    parser.add_argument('--unified_decoder', type=bool, default=False)
-    parser.add_argument('--n2s_decoder', type=bool, default=False)
+    parser.add_argument('--unified_encoder', type=str2bool, default=True)
+    parser.add_argument('--unified_decoder', type=str2bool, default=False)
+    parser.add_argument('--n2s_decoder', type=str2bool, default=False)
     parser.add_argument('--v_range', type=float, default=6.0, help='to control the entropy')
     parser.add_argument('--qkv_dim', type=int, default=16)
     parser.add_argument('--head_num', type=int, default=8)
     parser.add_argument('--logit_clipping', type=float, default=10)
     parser.add_argument('--ff_hidden_dim', type=int, default=512)
-    parser.add_argument('--tw_normalize', type=bool, default=True)
+    parser.add_argument('--use_fast_attention', type=str2bool, default=True)
+    parser.add_argument('--tw_normalize', type=str2bool, default=True)
     parser.add_argument('--norm', type=str, default="instance", choices=["batch", "batch_no_track", "instance", "layer", "rezero", "none"])
     parser.add_argument('--norm_loc', type=str, default="norm_last", choices=["norm_first", "norm_last"], help="whether conduct normalization before MHA/FFN")
-    parser.add_argument('--dual_decoder', type=bool, default=False)
+    parser.add_argument('--dual_decoder', type=str2bool, default=False)
     parser.add_argument('--aspect_num', type=int, default=2, help="aspects of info, now includes features and positional info")
     parser.add_argument('--pairwise_merge', type=str, default="feature,attention", help='Comma-separated list of modes: feature,embedding,attention')
     parser.add_argument('--which_feature', type=str, default="both", choices=["succ", "prec", "both"], help="SOP: which feature to use")
@@ -242,9 +309,9 @@ if __name__ == "__main__":
     parser.add_argument('--weight_decay', type=float, default=1e-6)
     parser.add_argument('--milestones', type=int, nargs='+', default=[4501, ], help='when to decay lr')
     parser.add_argument('--gamma', type=float, default=0.1, help='new_lr = lr * gamma')
-    parser.add_argument('--dynamic_coefficient', type=bool, default=False)
-    parser.add_argument('--uncertainty_weight', type=bool, default=False)
-    parser.add_argument("--amp_training", type=bool, default=True)
+    parser.add_argument('--dynamic_coefficient', type=str2bool, default=False)
+    parser.add_argument('--uncertainty_weight', type=str2bool, default=False)
+    parser.add_argument("--amp_training", type=str2bool, default=True)
 
     # trainer_params
     parser.add_argument('--epochs', type=int, default=5000, help="total training epochs")
@@ -258,11 +325,11 @@ if __name__ == "__main__":
     parser.add_argument('--model_save_interval', type=int, default=50)
 
     # PIP
-    parser.add_argument("--generate_PI_mask", type=bool, default=False)
-    parser.add_argument('--use_real_PI_mask', type=bool, default=False, help="whether to use PI masking")
+    parser.add_argument("--generate_PI_mask", type=str2bool, default=False)
+    parser.add_argument('--use_real_PI_mask', type=str2bool, default=False, help="whether to use PI masking")
     parser.add_argument('--pip_step', type=int, default=1)
     parser.add_argument('--pip_decoder', action='store_true', default=False)
-    parser.add_argument('--lazy_pip_model', type=bool, default=False)
+    parser.add_argument('--lazy_pip_model', type=str2bool, default=False)
     parser.add_argument('--simulation_stop_epoch', type=int, default=100) # use 100 when N=100
     parser.add_argument('--pip_update_interval', type=int, default=1000)
     parser.add_argument('--pip_update_epoch', type=int, default=20) # use 20 when N=100
@@ -271,56 +338,56 @@ if __name__ == "__main__":
     parser.add_argument('--pip_checkpoint', type=str, default=None)
 
     # constraints
-    parser.add_argument('--soft_constrained', type=bool, default=False)
+    parser.add_argument('--soft_constrained', type=str2bool, default=False)
     parser.add_argument('--backhaul_mask', type=str, default="soft", choices=["soft", "hard"])
     parser.add_argument('--non_linear', type=str, default=None, choices=[None, "fixed_epsilon", "decayed_epsilon", "step", "scalarization"])
     parser.add_argument('--epsilon', type=float, default=3.67)
     parser.add_argument('--epsilon_base', type=float, default=5.)
     parser.add_argument('--epsilon_decay_beta', type=float, default=0.001)
-    parser.add_argument('--non_linear_cons', type=bool, default=False, help="enable non-linear reward function during construction")
-    parser.add_argument('--out_reward', type=bool, default=True)
-    parser.add_argument("--out_node_reward",type=bool,default=True)
-    parser.add_argument("--penalty_normalize", type=bool, default=False)
-    parser.add_argument('--fsb_dist_only', type=bool, default=True)
-    parser.add_argument('--fsb_reward_only', type=bool, default=True) # activate only if no penalty
-    parser.add_argument('--infsb_dist_penalty', type=bool, default=False)
+    parser.add_argument('--non_linear_cons', type=str2bool, default=False, help="enable non-linear reward function during construction")
+    parser.add_argument('--out_reward', type=str2bool, default=True)
+    parser.add_argument("--out_node_reward", type=str2bool, default=True)
+    parser.add_argument("--penalty_normalize", type=str2bool, default=False)
+    parser.add_argument('--fsb_dist_only', type=str2bool, default=True)
+    parser.add_argument('--fsb_reward_only', type=str2bool, default=True) # activate only if no penalty
+    parser.add_argument('--infsb_dist_penalty', type=str2bool, default=False)
     parser.add_argument('--penalty_factor', type=float, default=1.0)
-    parser.add_argument('--reward_gating', type=bool, default=False)
-    parser.add_argument('--subgradient', type=bool, default=False) # adaptive_primal_dual
+    parser.add_argument('--reward_gating', type=str2bool, default=False)
+    parser.add_argument('--subgradient', type=str2bool, default=False) # adaptive_primal_dual
     parser.add_argument('--subgradient_lr', type=float, default=0.1)
     parser.add_argument('--constraint_number', type = int, default=4)
-    parser.add_argument('--gumbel', type=bool, default=False)
-    parser.add_argument('--wo_node_penalty', type=bool, default=False, help="without node penalty")
-    parser.add_argument('--wo_tour_penalty', type=bool, default=False, help="without tour penalty")
+    parser.add_argument('--gumbel', type=str2bool, default=False)
+    parser.add_argument('--wo_node_penalty', type=str2bool, default=False, help="without node penalty")
+    parser.add_argument('--wo_tour_penalty', type=str2bool, default=False, help="without tour penalty")
     # reward
     parser.add_argument('--baseline', type=str, choices=['group', "improve", "share"], default="group")# group reward: average rollout as baselines
-    parser.add_argument('--bonus_for_construction', type=bool, default=False, help="reduce the advantage for negative samples and increase the advantage for positive samples (with good quality and can be improved)")
-    parser.add_argument('--extra_bonus', type=bool, default=False, help="add extra bonus for improving the solution (with good quality and can be improved)")
+    parser.add_argument('--bonus_for_construction', type=str2bool, default=False, help="reduce the advantage for negative samples and increase the advantage for positive samples (with good quality and can be improved)")
+    parser.add_argument('--extra_bonus', type=str2bool, default=False, help="add extra bonus for improving the solution (with good quality and can be improved)")
     parser.add_argument('--extra_weight', type=float, default=0.1)
-    parser.add_argument('--diversity_loss', type=bool, default=True)
-    parser.add_argument('--diversity_reward', type=bool, default=False)
+    parser.add_argument('--diversity_loss', type=str2bool, default=True)
+    parser.add_argument('--diversity_reward', type=str2bool, default=False)
     parser.add_argument('--diversity_weight', type=float, default=0.01)
-    parser.add_argument('--probs_return', type=bool, default=False)
-    parser.add_argument('--imitation_learning', type=bool, default=True)
+    parser.add_argument('--probs_return', type=str2bool, default=False)
+    parser.add_argument('--imitation_learning', type=str2bool, default=True)
     parser.add_argument('--imitation_loss_weight', type=float, default=1.)
 
     # improvement
-    parser.add_argument('--improvement_only', type=bool, default=False)
+    parser.add_argument('--improvement_only', type=str2bool, default=False)
     parser.add_argument('--improvement_method', type=str, default="kopt", choices=["rm_n_insert", "kopt", "all"])
     parser.add_argument('--boundary', type=float, default=0.5)
-    parser.add_argument('--insert_before', type=bool, default=True)
+    parser.add_argument('--insert_before', type=str2bool, default=True)
     parser.add_argument('--rm_num', type=int, default=1)
     parser.add_argument('--coefficient', type=float, default=100)
-    parser.add_argument('--reconstruct', type=bool, default=False)
-    parser.add_argument('--reconstruct_improve_bonus', type=bool, default=False)
+    parser.add_argument('--reconstruct', type=str2bool, default=False)
+    parser.add_argument('--reconstruct_improve_bonus', type=str2bool, default=False)
     parser.add_argument('--reconstruct_bonus_weight', type=float, default=1.)
-    parser.add_argument('--neighborhood_search', type=bool, default=False)
+    parser.add_argument('--neighborhood_search', type=str2bool, default=False)
     parser.add_argument('--k_unconfident', type=int, default=10)
     parser.add_argument('--init_sol_strategy', type=str, default="POMO", choices=["random", "greedy_feasible", "random_feasible", "POMO"])
     parser.add_argument('--val_init_sol_strategy', type=str, default="POMO", choices=["random", "greedy_feasible", "random_feasible", "POMO"])
     parser.add_argument('--POMO_checkpoint', type=str, default="results/20240831_221004_TSPTW50_rmPOMOstart_Soft_unifiedEnc_GroupBaseline_construction_only/epoch-5000.pt")
     parser.add_argument('--max_dummy_size', type=int, default=12)
-    parser.add_argument('--improve_start_when_dummy_ok', type=bool, default=True)
+    parser.add_argument('--improve_start_when_dummy_ok', type=str2bool, default=True)
     parser.add_argument('--dummy_improve_steps', type=int, default=0)
     parser.add_argument('--dummy_improve_selected', type=str, default="random", choices=["random", "topk"])
 
@@ -329,29 +396,29 @@ if __name__ == "__main__":
     parser.add_argument('--stochastic_probability', type=float, default=0.5)
     parser.add_argument('--diversity', type=str, default="kendall_tau_distance", choices=["kendall_tau_distance", "jaccard_distance"])
     parser.add_argument('--total_history', type=int, default=3)
-    parser.add_argument('--with_infsb_feature', type=bool, default=True)
+    parser.add_argument('--with_infsb_feature', type=str2bool, default=True)
     parser.add_argument('--supplement_feature_dim', type=int, default=5) # for cvrp:5; for tsptw:5; for vrpbltw: 17
-    parser.add_argument('--with_explore_stat_feature', type=bool, default=True)
-    parser.add_argument('--with_RNN', type=bool, default=True)
+    parser.add_argument('--with_explore_stat_feature', type=str2bool, default=True)
+    parser.add_argument('--with_RNN', type=str2bool, default=True)
     parser.add_argument('--k_max', type=int, default=4)
-    parser.add_argument('--with_regular', type=bool, default=False)
-    parser.add_argument('--with_bonus', type=bool, default=False)
-    parser.add_argument('--seperate_obj_penalty', type=bool, default=False)
+    parser.add_argument('--with_regular', type=str2bool, default=False)
+    parser.add_argument('--with_bonus', type=str2bool, default=False)
+    parser.add_argument('--seperate_obj_penalty', type=str2bool, default=False)
 
     # settings (e.g., GPU)
     parser.add_argument('--seed', type=int, default=2024)
     parser.add_argument('--log_dir', type=str, default="./results")
     parser.add_argument('--no_cuda', action='store_true')
     parser.add_argument('--world_size', type=int, default=1)
-    parser.add_argument("--multiple_gpu", type=bool, default=False)
+    parser.add_argument("--multiple_gpu", type=str2bool, default=False)
     parser.add_argument('--occ_gpu', type=float, default=0., help="occupy (X)% GPU memory in advance, please use sparingly.")
-    parser.add_argument('--tb_logger', type=bool, default=True)
-    parser.add_argument('--wandb_logger', type=bool, default=True)
-    parser.add_argument('--clean_cache', type=bool, default=False)
-    parser.add_argument('--multi_processing', type=bool, default=False)
+    parser.add_argument('--tb_logger', type=str2bool, default=True)
+    parser.add_argument('--wandb_logger', type=str2bool, default=True)
+    parser.add_argument('--clean_cache', type=str2bool, default=False)
+    parser.add_argument('--multi_processing', type=str2bool, default=False)
 
     args = parser.parse_args()
-    set_problem_defaults(args)
+    if not args.disable_preset_args: set_problem_defaults(args)
     
     if args.eval_only:
         assert args.checkpoint is not None, "eval-only mode requires checkpoint!"

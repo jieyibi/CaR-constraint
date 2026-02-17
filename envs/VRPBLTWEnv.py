@@ -94,7 +94,7 @@ class VRPBLTWEnv:
         self.pomo_size = env_params['pomo_size']
         self.k_max = self.env_params['k_max'] if 'k_max' in env_params.keys() else None
         if 'pomo_start' in env_params.keys():
-            self.pomo_size = env_params['pomo_size'] if env_params['pomo_start'] else env_params['train_z_sample_size']
+            self.pomo_size = env_params['pomo_size']
         self.loc_scaler = env_params['loc_scaler'] if 'loc_scaler' in env_params.keys() else None
         self.device = torch.device('cuda', torch.cuda.current_device()) if 'device' not in env_params.keys() else env_params['device']
 

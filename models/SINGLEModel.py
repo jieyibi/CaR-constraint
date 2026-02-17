@@ -319,10 +319,10 @@ class SINGLEModel(nn.Module):
             # node_embedding = node_embedding.repeat_interleave(batch_size//node_embedding.size(0), 0)
             #
             # supplementary node features based on current solution
-            if self.problem in ['CVRP', "TSPTW", "VRPBLTW", "TSPDL", "SOP"]:
-                visited_time, depot_feature, node_feature = env.get_dynamic_feature(context, self.model_params["with_infsb_feature"], tw_normalize=self.model_params["tw_normalize"], feature=self.feature if self.problem=="SOP" else None)
-            # elif self.problem == 'TSP':
-            #     visited_time = env.get_order(rec, return_solution=False)
+            if self.problem in ['CVRP', "TSPTW", "VRPBLTW", "TSPDL"]:
+                visited_time, depot_feature, node_feature = env.get_dynamic_feature(context, self.model_params["with_infsb_feature"], tw_normalize=self.model_params["tw_normalize"])
+            elif self.problem == 'SOP':
+                visited_time, depot_feature, node_feature = env.get_dynamic_feature(context, self.model_params["with_infsb_feature"], tw_normalize=self.model_params["tw_normalize"], feature=self.feature)
             else:
                 raise NotImplementedError()
 
@@ -774,8 +774,6 @@ class SINGLE_Decoder(nn.Module):
         embedding_dim = self.model_params['embedding_dim']
         head_num = self.model_params['head_num']
         qkv_dim = self.model_params['qkv_dim']
-        poly_embedding_dim = self.model_params['poly_embedding_dim']
-        z_dim = model_params['z_dim']
         self.with_RNN = self.model_params['with_RNN']
         self.with_explore_stat_feature = self.model_params['with_explore_stat_feature']
         self.k_max = self.model_params['k_max']
@@ -866,9 +864,6 @@ class SINGLE_Decoder(nn.Module):
         self.single_head_key = encoded_nodes.transpose(1, 2)
         # shape: (batch, embedding, problem+1)
 
-        self.z = z
-        # shape: (batch, rollout, z_dim)
-
     def set_kv_sl(self, encoded_nodes):
         # encoded_nodes.shape: (batch, problem+1, embedding)
         head_num = self.model_params['head_num']
@@ -887,9 +882,6 @@ class SINGLE_Decoder(nn.Module):
         self.single_head_key_improve = h_em_final.transpose(1, 2)
         # shape: (batch, embedding, dummy_graph_size)
 
-        self.z_improve = z
-        # shape: (batch, rollout, z_dim)
-
     def set_q1(self, encoded_q1):
         # encoded_q.shape: (batch, n, embedding)  # n can be 1 or pomo
         head_num = self.model_params['head_num']
@@ -903,10 +895,6 @@ class SINGLE_Decoder(nn.Module):
         # shape: (batch, head_num, n, qkv_dim)
 
     def reset_EAS_layers(self, batch_size): # only use during inference
-        # self.EAS_W1 = torch.nn.Parameter(self.poly_layer_1.weight.mT.repeat(batch_size, 1, 1))
-        # self.EAS_b1 = torch.nn.Parameter(self.poly_layer_1.bias.repeat(batch_size, 1))
-        # self.EAS_W2 = torch.nn.Parameter(self.poly_layer_2.weight.mT.repeat(batch_size, 1, 1))
-        # self.EAS_b2 = torch.nn.Parameter(self.poly_layer_2.bias.repeat(batch_size, 1))
         emb_dim = self.model_params['embedding_dim']  # 128
         init_lim = (1 / emb_dim) ** (1 / 2)
 
@@ -1218,10 +1206,6 @@ class kopt_Decoder(nn.Module):
             param.data.uniform_(-stdv, stdv)
 
     def reset_EAS_layers(self, batch_size): # only use during inference
-        # self.EAS_W1 = torch.nn.Parameter(self.poly_layer_1.weight.mT.repeat(batch_size, 1, 1))
-        # self.EAS_b1 = torch.nn.Parameter(self.poly_layer_1.bias.repeat(batch_size, 1))
-        # self.EAS_W2 = torch.nn.Parameter(self.poly_layer_2.weight.mT.repeat(batch_size, 1, 1))
-        # self.EAS_b2 = torch.nn.Parameter(self.poly_layer_2.bias.repeat(batch_size, 1))
         emb_dim = self.model_params['embedding_dim']  # 128
         init_lim = (1 / emb_dim) ** (1 / 2)
 

@@ -4,12 +4,7 @@ import matplotlib.pyplot as plt
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import copy
-import re
-import csv
-import pytz
-import pdb
 import wandb
-import itertools
 import time
 from datetime import datetime
 from tqdm import tqdm
@@ -27,9 +22,6 @@ from tensorboard_logger import Logger as TbLogger
 from sklearn.metrics import confusion_matrix
 from utils import *
 from models.SINGLEModel import SINGLEModel
-# from sklearn.utils.class_weight import compute_class_weight
-# from torch.utils.data import DataLoader, DistributedSampler  # use pytorch dataloader
-# from sklearn.metrics import confusion_matrix, roc_auc_score
 
 
 class Trainer:
@@ -64,7 +56,7 @@ class Trainer:
 
         # Main Components
         self.envs = get_env(self.args.problem)
-        self.model = get_model(self.args.model_type)(**self.model_params).to(self.device)
+        self.model = SINGLEModel(**self.model_params).to(self.device)
         if self.args.multiple_gpu:
             self.model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
             self.model = DDP(self.model, device_ids=[rank], find_unused_parameters=True, static_graph=True)
@@ -77,10 +69,9 @@ class Trainer:
             self.optimizer = Optimizer([{'params': self.model.parameters()}, {'params': [self.lambda_]}],
                                        **self.optimizer_params['optimizer'])
         else:
-            # [torch.zeros([self.args.train_batch_size, 40])]
             # self.lambda_ = 2.0
             self.lambda_ = [torch.tensor(0.)] * trainer_params["constraint_number"] if trainer_params["subgradient"] else self.trainer_params["penalty_factor"]
-            print(self.lambda_)
+            if not self.tester_params["eval_only"]: print("lambda_: ", self.lambda_)
             self.subgradient_lr = trainer_params["subgradient_lr"]
             self.optimizer = Optimizer(self.model.parameters(), **self.optimizer_params['optimizer'])
         self.scheduler = Scheduler(self.optimizer, **self.optimizer_params['scheduler'])
@@ -136,6 +127,8 @@ class Trainer:
         self.penalty_factor = self.trainer_params["penalty_factor"]
 
         # Restore
+        # - test/eval_only: only load model_state_dict, do not restore epoch/optimizer/scheduler
+        # - train: additionally restore training state if available
         self.start_epoch = 1
         if args.checkpoint is not None:
             checkpoint_fullname = args.checkpoint
@@ -163,24 +156,12 @@ class Trainer:
                         # name = k[7:]  # remove `module.`
                         new_state_dict[name] = v
                     self.model.load_state_dict({**new_state_dict}, strict=False)
-            # torch.save(
-            #     {
-            #         'epoch': checkpoint['epoch'],
-            #         'model_state_dict': checkpoint['model_state_dict']
-            #     },
-            #     "/home/jieyi/unified_solver_1/test/TSPTW100/20240914_001235_TSPTW100_Hard_rmPOMOstart_Soft_womask_withPenalty_varyN_construction_only/checkpoint-5000.pt"
-            # )
-            self.start_epoch = 1 + checkpoint['epoch']
-            self.scheduler.last_epoch = checkpoint['epoch'] - 1
-            if self.trainer_params["load_optimizer"]:
-                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                print(f"Rank {rank} >> optimizer (Epoch: {checkpoint['epoch']}) Loaded (lr = {self.optimizer.param_groups[0]['lr']})!")
-            print(f"Rank {rank} >> Checkpoint (Epoch: {checkpoint['epoch']}) Loaded!")
-            print(f"Rank {rank} >> Load from {checkpoint_fullname}")
+            if not self.tester_params["eval_only"]:
+                self._restore_training_state(checkpoint, checkpoint_fullname, rank)
 
         if args.POMO_checkpoint is not None and args.init_sol_strategy == "POMO" and args.improvement_only:
             input_model_params = {**self.model_params, "improve_steps": 0, "improvement_only": False} # only construction
-            self.pomo_model = get_model(self.args.model_type)(**input_model_params).to(self.device)
+            self.pomo_model = SINGLEModel(**input_model_params).to(self.device)
             print(f"Rank {rank} >> Load from {args.POMO_checkpoint}")
             num_param(self.pomo_model)
             checkpoint = torch.load(args.POMO_checkpoint, map_location=self.device, weights_only=False)
@@ -215,6 +196,32 @@ class Trainer:
         self.ACCURACY_THRESHOLD_GOOD = 0.75
         self.ACCURACY_THRESHOLD_OK = 0.6
         self.REWARD_MULTIPLIER = 10
+
+    def _restore_training_state(self, checkpoint, checkpoint_fullname, rank: int):
+        """
+        Restore training-related state from a checkpoint in training mode:
+        - current epoch (start_epoch)
+        - scheduler's last_epoch
+        - optimizer state (if available and requested)
+        This is NOT used in pure evaluation (eval_only) mode.
+        """
+        if not isinstance(checkpoint, dict) or 'epoch' not in checkpoint:
+            # Skip restoration if the checkpoint does not contain training info
+            return
+
+        epoch = checkpoint['epoch']
+        self.start_epoch = 1 + epoch
+        self.scheduler.last_epoch = epoch - 1
+
+        if self.trainer_params.get("load_optimizer", False) and 'optimizer_state_dict' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            print(
+                f"Rank {rank} >> optimizer (Epoch: {epoch}) Loaded "
+                f"(lr = {self.optimizer.param_groups[0]['lr']})!"
+            )
+
+        print(f"Rank {rank} >> Checkpoint (Epoch: {epoch}) Loaded!")
+        print(f"Rank {rank} >> Load from {checkpoint_fullname}")
 
     def _get_model(self):
         """Get model, handling DDP wrapper"""
@@ -327,10 +334,6 @@ class Trainer:
             if self.trainer_params["non_linear"] == "decayed_epsilon":
                 self.trainer_params["epsilon"] = self.trainer_params["epsilon_base"] * np.exp(- self.trainer_params["epsilon_decay_beta"] * epoch)
                 print(f'>> Epsilon = {self.trainer_params["epsilon"]}')
-            # if epoch == 401:
-            #     self.trainer_params["select_top_k"] = 3
-            # else:
-            #     self.trainer_params["select_top_k"] = 4
 
             # if dummy <= max_dummy_size, begin to improve
             # print("{}, {}".format(improve_steps, validation_improve_steps))
@@ -427,13 +430,25 @@ class Trainer:
         # Load test dataset
         test_problems = [self.args.problem]
         test_episodes, problem_size = self.tester_params['test_episodes'], self.env_params['problem_size']
+        # Determine base data directory for the current problem
+        base_dir = get_data_dir_for_problem(self.args.problem)
+
         if self.tester_params['test_dataset'] is not None:
+            # Allow passing a single string or a list of dataset names
             paths = self.tester_params['test_dataset']
-            dir = ["./data/{}/".format(self.args.problem)] * len(paths)
+            if isinstance(paths, str):
+                paths = [paths]
+            dir = [base_dir] * len(paths)
             test_envs = [get_env(prob)[0] for prob in test_problems] * len(paths)
         else:
-            dir = [os.path.join("./data", prob) for prob in test_problems]
-            paths = ["{}{}_uniform.pkl".format(prob.lower(), problem_size) for prob in test_problems]
+            # Use problem-specific default dataset naming
+            hardness = self.env_params.get("hardness", "hard")
+            sop_variant = self.env_params.get("sop_variant", 1)
+            dir = [base_dir for _ in test_problems]
+            paths = [
+                get_default_test_dataset_name(prob, problem_size, hardness=hardness, sop_variant=sop_variant)
+                for prob in test_problems
+            ]
             test_envs = [get_env(prob)[0] for prob in test_problems]
 
 
@@ -893,7 +908,7 @@ class Trainer:
         if self.tester_params["is_lib"]:
             rollout_size=env.problem_size
             # self.trainer_params["select_top_k"] = env.problem_size
-        print("rollout_size", rollout_size)
+        # print("rollout_size", rollout_size)
 
         with torch.inference_mode():
             with torch.amp.autocast("cuda") if "cuda" in str(self.device) else torch.inference_mode():
@@ -941,7 +956,7 @@ class Trainer:
                                                                    )
             # Return
             aug_score_fsb, no_aug_score_fsb, aug_feasible, no_aug_feasible, best_solution = self._get_construction_output_val(aug_factor * sample_size, infeasible, reward, env.selected_node_list)
-            print(env._get_travel_distance().size())
+            # print("current env batch size: ", env._get_travel_distance().size()[0])
             solution_saved = env.selected_node_list.reshape(aug_factor, batch_size, -1)
             if self.rank==0: print(f"Rank {self.rank} >> val construction time: ", time.time() - tik)
         ###########################################Improvement########################################
@@ -1056,7 +1071,7 @@ class Trainer:
             rollout_size = env.problem_size
             # self.trainer_params["select_top_k"] = env.problem_size
         # rollout_size += 1
-        print("rollout_size", rollout_size)
+        # print("rollout_size", rollout_size)
         iterations = self.tester_params['EAS_params']['iterations']
         enable_EAS = self.tester_params['EAS_params']['enable']
 
@@ -1309,6 +1324,7 @@ class Trainer:
         #         for batch in val_loader:
         #             batch = batch.to(self.rank)
         #             self._val_one_batch(batch, env, aug_factor=8, eval_type="argmax")
+        print(">> validation eval type: ", self.model_params["eval_type"])
         if self.tester_params["eval_only"]: self.time_estimator.reset()
         episode = 0
 
@@ -1317,7 +1333,7 @@ class Trainer:
             bs = min(batch_size, remaining)
             path_ = os.path.join(dir, val_path) if not self.tester_params["is_lib"] else val_path
             data = env.load_dataset(path_, offset=episode, num_samples=bs)
-            print(self.model_params["eval_type"])
+            # print(self.model_params["eval_type"])
             # env_params = {'problem_size': node_xy.size(1), 'pomo_size': node_xy.size(1), 'loc_scaler': loc_scaler
             # env.pomo_size = data[0].size(1)
             # env.problem_size = data[0].size(1)
@@ -1331,18 +1347,6 @@ class Trainer:
             if isinstance(output, list):
                 pred_LIST = np.append(pred_LIST, output[0])
                 label_LIST = np.append(label_LIST, output[1])
-            # else:
-            #     try:
-            #         # assert sample_size == 1, "Need checking..."
-            #         # assert env.pomo_size == 1, "Need checking..."
-            #         solution_saved = torch.cat([solution_saved, output], dim=1)
-            #         print(solution_saved.size())
-            #     except:
-            #         solution_saved = output
-            #         print(solution_saved.size())
-            #     # if solution_saved.size(1) == self.tester_params["test_episodes"]:
-            #     #     torch.save(solution_saved, "./cvrpbltw100_with_initialTourbyPOMOstar.pt")
-            #     #     print("saved!")
 
             if self.tester_params['refinement_history_path'] is not None:
                 if episode == 0:
@@ -1386,7 +1390,10 @@ class Trainer:
             if self.rank == 0: print("PIP-D Validation, Auc: {:.4f}, Infeasible Auc: {:.4f} ({}), Feasible Auc: {:.4f} ({})".format(accuracy, infsb_accuracy,(fn + tp), fsb_accuracy,(tn + fp)))
         self.val_metric_logger._log_output(self)
 
-        sol_path = get_opt_sol_path(dir, env.problem, data[1].size(1)) if env.problem in ["CVRP", "VRPBLTW"] else os.path.join(dir, "lkh_" + val_path)
+        if self.env_params["val_opt_path"] is not None:
+            sol_path = self.env_params["val_opt_path"]
+        else:
+            sol_path = get_opt_sol_path(dir, env.problem, data[1].size(1)) if env.problem in ["CVRP", "VRPBLTW"] else os.path.join(dir, "lkh_" + val_path)
         print(f">> Load optimal solution from: {sol_path}")
 
         compute_gap = os.path.exists(sol_path) if not self.tester_params["is_lib"] else False
@@ -1395,41 +1402,6 @@ class Trainer:
             opt_sol = load_dataset(sol_path, disable_print=True)[: val_episodes]
             grid_factor = 100. if self.args.problem == "TSPTW" else 1.
             opt_sol = torch.tensor([i[0]/grid_factor for i in opt_sol])
-
-            # import json
-            # with open('/home/jieyi/milp_zoo/OptiGuide/milp-evolve/src/milp_evolve_llm/vrptwb_results_1000_instances_new.json', 'r') as f:
-            #     json_data = json.load(f)
-            # solution = pad_to_tensor([reconstruct_flattened_route_no_extra_zeros(entry["solution_edges"]) for entry in json_data])
-            # rec = sol2rec(solution.unsqueeze(1)).view(batch_size, -1)
-            # env0 = copy.deepcopy(env)
-            # path_ = os.path.join(dir, val_path) if not self.tester_params["is_lib"] else val_path
-            # data = env.load_dataset(path_, offset=0, num_samples=1000)
-            # env0.load_problems(batch_size, 1, problems=data, aug_factor=1)
-            # env0.selected_node_list = solution.unsqueeze(1)
-            # env0._get_travel_distance()
-            # out_node_penalty = env0.get_costs(rec, get_context=True)[3]
-            # feasible = (out_node_penalty.sum(0) == 0).bool()
-            # print(out_node_penalty.size())
-            # print("Feasible count:", (out_node_penalty.sum(0) == 0).sum())
-            # best_obj = torch.tensor([entry["best_obj"]/1000 for entry in json_data])
-            # best_bound = torch.tensor([entry["best_bound"] / 1000 for entry in json_data])
-            # best_obj0 = env0._get_travel_distance().view(-1)
-
-            # print("Best obj0 gap:", ((self.val_metric_logger.reconstruct_masked_metrics["aug_score"][feasible] -best_obj0[feasible]) / best_obj0[feasible]).mean() * 100)
-            # print("Best obj gap:", ((self.val_metric_logger.reconstruct_masked_metrics["aug_score"][feasible] - best_obj[feasible]) / best_obj[feasible]).mean() * 100)
-            # print("Best bound gap:", ((self.val_metric_logger.reconstruct_masked_metrics["aug_score"][feasible] - best_bound[feasible]) / best_bound[feasible]).mean() * 100)
-            # print("Best or tools gap:", ((self.val_metric_logger.reconstruct_masked_metrics["aug_score"][feasible] - opt_sol[feasible]) / opt_sol[feasible]).mean() * 100)
-
-            # for per in range(2, self.trainer_params["validation_improve_steps"] + 2, 2):
-            #     cost = torch.where(self.val_metric_logger.feasible_bsf_history[:, 2:],
-            #                        self.val_metric_logger.reward_history[:, 2:], float("inf"))
-            #     cost = cost[:, :per + 1].min(dim=-1)[0]
-            #     infsb = (cost == float('inf')).sum() / 1000 * 100
-            #     cost_ = cost[~torch.isinf(cost)]
-            #     opt_sol_ = opt_sol[~torch.isinf(cost)]
-            #     gap = (cost_ - opt_sol_) / opt_sol_ * 100
-            #     print(f'Avg best fsb gap after T={per} steps:'.center(35), '{:<10f} +- {:<10f} ({:.1f}%)'.format(
-            #         gap.mean(), torch.std(gap) / math.sqrt(batch_size), infsb))
 
             self.val_metric_logger._calculate_gap(self, opt_sol)
             try:
@@ -1448,47 +1420,6 @@ class Trainer:
             if self.rank==0 and self.trainer_params["validation_improve_steps"] > 0.: print(f'Rank {self.rank} >> Val Score on {val_path}: [Improvement] NO_AUG_Score: {self.val_metric_logger.improve_metrics["no_aug_score_list"]}, --> AUG_Score: {self.val_metric_logger.improve_metrics["aug_score_list"]}; Infeasible rate: {self.val_metric_logger.improve_metrics["sol_infeasible_rate_list"]}% (solution-level), {self.val_metric_logger.improve_metrics["ins_infeasible_rate_list"]}% (instance-level)')
             if self.rank == 0 and self.args.problem == "VRPBLTW" and self.trainer_params["validation_improve_steps"] > 0. and self.trainer_params["reconstruct"]: print(f'Rank {self.rank} >> Val Score on {val_path}: [w/o mask] NO_AUG_Score: {self.val_metric_logger.reconstruct_metrics["no_aug_score_list"]} --> AUG_Score: {self.val_metric_logger.reconstruct_metrics["aug_score_list"]}; Infeasible rate: {self.val_metric_logger.reconstruct_metrics["sol_infeasible_rate_list"]}% (solution-level), {self.val_metric_logger.reconstruct_metrics["ins_infeasible_rate_list"]}% (instance-level)')
             if self.rank==0 and self.tester_params["aux_mask"]: print(f'Rank {self.rank} >> Val Score on {val_path}: [w. mask] NO_AUG_Score: {self.val_metric_logger.reconstruct_masked_metrics["no_aug_score_list"]}, --> AUG_Score: {self.val_metric_logger.reconstruct_masked_metrics["aug_score_list"]}; Infeasible rate: {self.val_metric_logger.reconstruct_masked_metrics["sol_infeasible_rate_list"]}% (solution-level), {self.val_metric_logger.reconstruct_masked_metrics["ins_infeasible_rate_list"]}% (instance-level)')
-        #
-        # from similarity import find_best_solutions_and_trajectories
-        # best_solutions, best_penalties, best_distances, best_solution_trajectories, best_indices = find_best_solutions_and_trajectories(
-        #     penalty_history=self.val_metric_logger.refinement_penalty_history.reshape(8, 10000, -1)[:,:,1:],
-        #     distance_history=self.val_metric_logger.refinement_travel_distance_history.reshape(8, 10000, -1)[:,:,1:],
-        #     solution_history=self.val_metric_logger.solution_history.reshape(8, 10000, -1, 100))
-        # values, counts = torch.unique(best_indices[:,1], return_counts=True)
-        # values = values.cpu().numpy()
-        # counts = counts.cpu().numpy()
-        # df = pd.DataFrame({
-        #     "value": values,
-        #     "count": counts
-        # })
-        # df.to_excel("step_best_value_counts.xlsx", index=False)
-        # plt.figure(figsize=(8, 5))
-        # plt.bar(values, counts)
-        # plt.xlabel("Value")
-        # plt.ylabel("Count")
-        # plt.title("Frequency of Values in Tensor")
-        # plt.tight_layout()
-        # plt.savefig("step_barplot.pdf")
-        # plt.show()
-        # torch.save(best_solution_trajectories, "TSPTW100_best_solution_trajectories.pt")
-        # torch.save(best_indices, "TSPTW100_best_indices.pt")
-        # torch.save(best_distances, "TSPTW100_best_distances.pt")
-        # torch.save(best_penalties, "TSPTW100_best_penalties.pt")
-        # torch.save(best_solutions, "TSPTW100_best_solutions.pt")
-        # torch.save(self.val_metric_logger.solution_history, f"./TSPTW100_{self.tester_params['refinement_history_path']}.pt")
-        # print("SAVE", self.val_metric_logger.solution_history.size())
-
-        # sol = self.val_metric_logger.solution_history.reshape(8, self.tester_params["sample_size"], val_episodes, -1)[0]
-        # torch.save(sol, f"./{self.tester_params['refinement_history_path']}.pt")
-        # print("SAVE", sol.size())
-        # start = sol[..., :-1]
-        # nxt = sol[..., 1:]
-        # route_start = (start == 0) & (nxt != 0)
-        # noaug_num_vehicles = route_start.sum(dim=-1).float()
-        # print(f"{noaug_num_vehicles.mean()} +- {noaug_num_vehicles.std()}")
-        # from diversity import compute_solution_diversity
-        # metrics = ['edge_jaccard']
-        # results1 = compute_solution_diversity(None, metrics, sol)
 
     def _improvement(self, env, epsilon=None, cons_reward=None, batch_reward=None, weights=None, cons_log_prob=None):
         amp_training = self.trainer_params['amp_training']
@@ -1884,7 +1815,7 @@ class Trainer:
 
                 if "TSP" not in self.args.problem and self.problem != "SOP": solution = get_solution_with_dummy_depot(solution, env.problem_size)
                 batch_size, pomo_size, solution_size = solution.size() # batch_size = aug_factor * batch_size
-                print(solution.size())
+                print("! solution size: ", solution.size())
                 rec = sol2rec(solution).view(batch_size * pomo_size, -1)
 
                 # preapare input
@@ -2035,19 +1966,7 @@ class Trainer:
                     # Update scores with current step's results
                     min_scores = torch.where(feasible, torch.min(min_scores, obj[:, 0]), min_scores).clone()
 
-                    # Update out_node_penalties and out_penalties
-                    # if self.args.problem == "CVRP":
-                    #     current_out_node_penalty = (context[2] > 1.00001).sum(-1)
-                    #     # current_out_penalty = (context[3] - 1.00001).clamp(min=0).sum(dim=-1)
-                    #     current_out_penalty = ((context[3] - 1.00001) * (context[3] > 1.00001)).sum(dim=1)
-                    # elif self.args.problem == "TSPTW":  # arrival_time - tw_end
-                    #     current_out_penalty = torch.clamp_min(context[1] - context[-1], 0.0).sum(-1)
-                    #     if self.trainer_params["penalty_normalize"]:
-                    #         try:
-                    #             current_out_penalty = current_out_penalty / context[-1][:, 0]
-                    #         except:
-                    #             current_out_penalty = current_out_penalty / context[-1][:, :1]
-                    #     current_out_node_penalty = (torch.clamp_min(context[1] - context[-1], 0.0) > 1e-5).sum(-1)  # (b*k)
+
                     out_node_penalties = torch.min(out_node_penalties, out_node_penalty.sum(0)).clone()
                     out_penalties = torch.min(out_penalties, out_penalty.sum(0)).clone()
 
@@ -2167,7 +2086,7 @@ class Trainer:
             except:
                 batch_reward = []
                 weights = 0
-        print(solution.size())
+        print("! solution size: ", solution.size())
         is_improved = torch.zeros(solution.size(0) // aug_factor).bool()
 
         for iter in tqdm(range(iterations)):

@@ -2,7 +2,7 @@
 
 <p align="center">
 <a href="https://iclr.cc/"><img alt="License" src="https://img.shields.io/static/v1?label=ICLR'26&message=Rio de Janeiro&color=purple&style=flat-square"></a>&nbsp;&nbsp;&nbsp;&nbsp;
-<a href="https://openreview.net/forum?id=raDFGuQxvD"><img alt="License" src="https://img.shields.io/static/v1?label=OpenReview&message=Paper&color=blue&style=flat-square"></a>&nbsp;&nbsp;&nbsp;&nbsp;
+<a href="https://openreview.net/forum?id=raDFGuQxvD"><img alt="License" src="https://img.shields.io/static/v1?label=ICLR&message=Poster&color=blue&style=flat-square"></a>&nbsp;&nbsp;&nbsp;&nbsp;
 <a href="https://github.com/jieyibi/CaR-constraint/blob/master/README.md"><img 
 alt="License" src="https://img.shields.io/static/v1?label=License&message=MIT&color=rose&style=flat-square"></a>
 </p>
@@ -51,44 +51,103 @@ gunzip sop50_uniform_variant1.pkl.gz sop50_uniform_variant2.pkl.gz
 cd ../..
 ```
 
+---
+
+## Supported Problems
+
+- **CVRP**: Capacitated Vehicle Routing Problem
+- **TSPTW**: Traveling Salesman Problem with Time Windows
+- **TSPDL**: Traveling Salesman Problem with Deadlines
+- **VRPBLTW**: Capacitated Vehicle Routing Problem with Backhauls and Time Windows
+- **SOP**: Sequential Ordering Problem
 
 ---
 
-
-
 ## Usage
+
+The code accommodates three distinct modes for training and testing:
+- Construct-and-Refine, please use nonzero integers for `--improve_steps` and `--validation_improve_steps`
+- Construction only, please add `--improve_steps=0 --validation_improve_steps=0` 
+- Improvement only, please use `--improvement_only`
 
 <details>
     <summary><strong>Train</strong></summary>
 
+The code accommodates two different construction models (POMO and PIP for TSPTW/TSPDL) and two refinement operators (e.g., k-opt and Remove-and-Reinsertion).
+
 ```shell
 # Default: --problem=TSPTW --problem_size=50 --pomo_size=50
-
-# 1. CaR (Construction + Refinement)
 python train.py --problem={PROBLEM} --problem_size={PROBLEM_SIZE} --improve_steps={IMPROVE_STEPS}
 
 # Note: 
-# 1. If you want to resume, please add arguments: `--checkpoint` and `--load_optimizer`
-# 2. Key parameters:
+# 1. To activate PIP for TSPTW and TSPDL, please add `--generate_PI_mask --use_real_PI_mask`. The default setting is to use POMO.
+# 2. To activate Remove-and-Reinsertion (especially helpful in multi-constrained CVRPBLTW), please add `--improvement_method=rm_n_insert --n2s_decoder`. The default setting is to use k-opt.
+# 3. If you want to resume, please add arguments: `--checkpoint` and `--load_optimizer`
+# 4. Key parameters:
 #    --improve_steps: number of improvement steps during training (default: 5)
 #    --validation_improve_steps: number of improvement steps during validation (default: 20)
 #    --unified_encoder: whether to use shared encoder for construction and improvement (default: True)
-#    --improvement_method: "rm_n_insert" or "kopt" (default: "rm_n_insert")
 #    --select_top_k: number of solutions to select for improvement (default: 10)
-
-# 2. Construction only (baseline)
-python train.py --problem={PROBLEM} --problem_size={PROBLEM_SIZE} --improve_steps=0
 ```
 </details> 
 
 <details>
     <summary><strong>Evaluation</strong></summary>
 
+### 1. Using Pretrained Models
+
+We provide pretrained models for all supported problems. You can directly use these models for evaluation:
+
+#### TSPTW
+```shell
+# CaR-POMO models
+python test.py --problem TSPTW --problem_size 50 --hardness hard --checkpoint pretrained/TSPTW/CaR-POMO_50_hard/checkpoint.pt 
+python test.py --problem TSPTW --problem_size 100 --hardness hard --checkpoint pretrained/TSPTW/CaR-POMO_100_hard/checkpoint.pt
+
+# CaR-PIP models (with PI masking)
+python test.py --problem TSPTW --problem_size 50 --hardness hard --checkpoint pretrained/TSPTW/CaR-PIP_50_hard/checkpoint.pt 
+python test.py --problem TSPTW --problem_size 100 --hardness hard --checkpoint pretrained/TSPTW/CaR-PIP_100_hard/checkpoint.pt 
+```
+
+#### CVRPBLTW
+```shell
+# CaR-kopt models
+python test.py --problem VRPBLTW --problem_size 50 --checkpoint pretrained/CVRPBLTW/CaR-kopt_50/checkpoint.pt 
+python test.py --problem VRPBLTW --problem_size 100 --checkpoint pretrained/CVRPBLTW/CaR-kopt_100/checkpoint.pt 
+
+# CaR-rr models (rm_n_insert improvement method)
+python test.py --problem VRPBLTW --problem_size 50 --checkpoint pretrained/CVRPBLTW/CaR-rr_50/checkpoint.pt 
+python test.py --problem VRPBLTW --problem_size 100 --checkpoint pretrained/CVRPBLTW/CaR-rr_100/checkpoint.pt 
+```
+
+#### TSPDL
+```shell
+python test.py --problem TSPDL --problem_size 50 --hardness hard --checkpoint pretrained/TSPDL/CaR-PIP_50_hard/checkpoint.pt 
+```
+
+#### CVRP
+```shell
+python test.py --problem CVRP --problem_size 50 --checkpoint pretrained/CVRP/CaR-POMO_50/checkpoint.pt 
+python test.py --problem CVRP --problem_size 100 --checkpoint pretrained/CVRP/CaR-POMO_100/checkpoint.pt
+# Note: you could use `--enable_EAS` to run CaR with EAS
+```
+
+#### SOP
+```shell
+# Variant 1
+python test.py --problem SOP --problem_size 50 --sop_variant 1 --checkpoint pretrained/SOP/Variant1/checkpoint.pt
+# Variant 2
+python test.py --problem SOP --problem_size 50 --sop_variant 2 --checkpoint pretrained/SOP/Variant2/checkpoint.pt
+```
+
+**Note**: 
+- All pretrained models are trained with `--improve_steps=5` during training
+- For evaluation, we recommend using `--validation_improve_steps=20`(default) to match the training setting, but you can adjust this value based on your needs
+
+### 2. Using Your Own Models
+
 ```shell
 # Default: --problem=TSPTW --problem_size=50
-
-# 1. CaR (Construction + Refinement)
-
 # If you want to evaluate on your own dataset,
 python test.py --test_dataset={TEST_DATASET} --checkpoint={MODEL_PATH} --improve_steps={IMPROVE_STEPS} --validation_improve_steps={VAL_IMPROVE_STEPS}
 # Optional: add `--opt_sol_path` to calculate optimality gap.
@@ -96,20 +155,11 @@ python test.py --test_dataset={TEST_DATASET} --checkpoint={MODEL_PATH} --improve
 # If you want to evaluate on the provided dataset,
 python test.py --problem={PROBLEM} --problem_size={PROBLEM_SIZE} --checkpoint={MODEL_PATH} --improve_steps={IMPROVE_STEPS} --validation_improve_steps={VAL_IMPROVE_STEPS}
 
-# 2. Construction only
-
-# If you want to evaluate on your own dataset,
-python test.py --test_dataset={TEST_DATASET} --checkpoint={MODEL_PATH} --improve_steps=0
-# Optional: add `--opt_sol_path` to calculate optimality gap.
-
-# If you want to evaluate on the provided dataset,
-python test.py --problem={PROBLEM} --problem_size={PROBLEM_SIZE} --checkpoint={MODEL_PATH} --improve_steps=0
-
-
 # Please set your own `--test_batch_size` based on your GPU memory constraint.
+# Please use `--disable_preset_args` to disable the default arguments if you train with your own settings.
 ```
 
-</details> 
+</details>
 
 <details>
     <summary><strong>Generate data</strong></summary>
@@ -172,17 +222,6 @@ python baselines/greedy_parallel.py --problem={PROBLEM} --datasets={DATASET_PATH
 
 </details>
 
-
-
----
-
-## Supported Problems
-
-- **CVRP**: Capacitated Vehicle Routing Problem
-- **TSPTW**: Traveling Salesman Problem with Time Windows
-- **TSPDL**: Traveling Salesman Problem with Deadlines
-- **VRPBLTW**: Vehicle Routing Problem with Backhauls and Time Windows
-- **SOP**: Sequential Ordering Problem
 
 ---
 
