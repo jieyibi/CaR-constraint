@@ -165,7 +165,7 @@ python test.py --problem={PROBLEM} --problem_size={PROBLEM_SIZE} --checkpoint={M
 <details>
     <summary><strong>Generate data</strong></summary>
 
-For evaluation, you can use our [provided datasets](https://github.com/jieyibi/CaR-constraint/tree/main/data) or generate data by running the following command:
+For evaluation, you can use our [provided datasets](https://github.com/jieyibi/CaR-constraint/tree/master/data) or generate data by running the following command:
 
 ```shell
 # Default: --problem="TSPTW" --problem_size=50 --num_samples=10000 --hardness="hard"
