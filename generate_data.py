@@ -27,6 +27,7 @@ if __name__ == "__main__":
         "hardness": args.hardness,
         "sop_variant": args.sop_variant,
         "limited_vehicle_number": args.limited_vehicle_number,
+        "kmax": 4,
     }
     seed_everything(args.seed)
 
@@ -57,5 +58,5 @@ if __name__ == "__main__":
         env.generate_dataset(args.num_samples, args.problem_size, dataset_path)
         # sanity check
         data = env.load_dataset(dataset_path, num_samples=args.num_samples, disable_print=False)
-        for i in len(data):
+        for i in range(len(data)):
             print(data[i][0][:20])
